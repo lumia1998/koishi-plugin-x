@@ -58,7 +58,7 @@ export function apply(ctx: Context, config: Config) {
   if (config.detectXLinks) {
     ctx.middleware(async (session, next) => {
       const content = session.content || ''
-      const twitterRegex = /https?:\/\/(?:www\.)?(?:twitter\.com|x\.com)\/[a-zA-Z0-9_]+\/status\/(\d+)/
+      const twitterRegex = /https?:\/\/(?:www\.|mobile\.)?(?:twitter\.com|x\.com)\/[a-zA-Z0-9_]+\/status\/(\d+)/
       const match = content.match(twitterRegex)
       
       if (match) {
@@ -82,7 +82,7 @@ export function apply(ctx: Context, config: Config) {
     .action(async ({ session }, url) => {
       if (!session) return
       if (!url) return '请输入推特链接'
-      const match = url.match(/(?:twitter\.com|x\.com)\/[a-zA-Z0-9_]+\/status\/(\d+)/)
+      const match = url.match(/(?:twitter\.com|x\.com|mobile\.twitter\.com|mobile\.x\.com)\/[a-zA-Z0-9_]+\/status\/(\d+)/)
       if (!match) return '不是有效的推文链接！'
       
       try {
@@ -98,7 +98,8 @@ export function apply(ctx: Context, config: Config) {
 
 // 核心链路：抓取 -> 翻译 -> 截图渲染 -> 发送消息
 async function processTweet(session: Session, ctx: Context, config: Config, tweetId: string, chatLunaModel?: ComputedRef<ChatLunaChatModel>, originalUrl?: string) {
-  const tweetUrl = originalUrl || `https://x.com/i/status/${tweetId}`
+  let tweetUrl = originalUrl || `https://x.com/i/status/${tweetId}`
+  tweetUrl = tweetUrl.replace('mobile.twitter.com', 'twitter.com').replace('mobile.x.com', 'x.com')
   let tweetText = ''
   let translatedText = ''
   let screenshotBuf: Buffer | null = null
