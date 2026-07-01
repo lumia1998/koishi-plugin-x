@@ -1,10 +1,7 @@
 import { Context, Schema, h } from 'koishi'
 
 export const name = 'x'
-export const inject = {
-  required: ['puppeteer'],
-  optional: ['chatluna'] // 声明可选依赖 chatluna
-}
+export const inject = ['puppeteer', 'chatluna']
 
 export interface Config {
   detectXLinks: boolean
