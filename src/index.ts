@@ -125,7 +125,7 @@ async function processTweet(session: Session, ctx: Context, config: Config, twee
     throw new Error('未能生成推文截图')
   }
 
-  // 4. 发送结果：图片与视频分开发送，解决部分平台不支持单条消息包含图文和视频的问题
+  // 4. 发送结果：图片与视频分开发送
   await session.send(h.image(screenshotBuf, 'image/png'))
 
   // 发送翻译
@@ -140,7 +140,7 @@ async function processTweet(session: Session, ctx: Context, config: Config, twee
   }
 }
 
-// 模拟 xanalyse 浏览器登录截图与内容提取 (加入重试机制)
+// 模拟 xanalyse 浏览器登录截图与内容提取 (加入重试机制 + vxtwitter API 获取媒体)
 async function scrapeTweetWithCookie(ctx: Context, url: string, cookies: string, maxRetries = 3) {
   let attempts = 0
   let page: any
@@ -181,7 +181,12 @@ async function scrapeTweetWithCookie(ctx: Context, url: string, cookies: string,
         throw new Error('未能找到推文容器')
       }
 
-      // 获取正文 (仅从主推文中获取，避免主推文无文字时误抓下方回复的文字)
+      // 检查是否为受保护账号
+      const isProtected = await page.evaluate(() => {
+        return !!document.querySelector('[aria-label="受保护账号"]')
+      })
+
+      // 获取正文
       const textContent = await element.evaluate((el: any) => {
         const textEl = el.querySelector('div[data-testid="tweetText"]')
         return textEl ? textEl.textContent || '' : ''
@@ -228,21 +233,23 @@ async function scrapeTweetWithCookie(ctx: Context, url: string, cookies: string,
         screenshotBuffer = await element.screenshot({ type: "webp" })
       }
 
-      // 从 DOM 提取仅属于该推文的媒体资源链接 (避免抓取到下方回复中的表情包/视频)
-      const mediaUrls = await element.evaluate((el: any) => {
-        const urls: string[] = []
-        const images = el.querySelectorAll('img[src*="pbs.twimg.com/media/"]')
-        images.forEach((img: any) => {
-          const src = img.getAttribute('src')
-          if (src) urls.push(src)
-        })
-        const videos = el.querySelectorAll('video')
-        videos.forEach((v: any) => {
-          const src = v.getAttribute('src')
-          if (src) urls.push(src)
-        })
-        return urls
-      })
+      // 获取媒体列表：如果是受保护账号，不获取视频。否则调用 vxtwitter API。
+      let mediaUrls: string[] = []
+      if (!isProtected) {
+        const apiUrl = url.replace(/(twitter\.com|x\.com)/, 'api.vxtwitter.com')
+        try {
+          const apiResponse = await ctx.http.get(apiUrl, {
+            headers: {
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            }
+          })
+          if (apiResponse && apiResponse.media_extended) {
+            mediaUrls = apiResponse.media_extended.map((m: any) => m.url)
+          }
+        } catch (apiErr) {
+          ctx.logger('twitter-ultimate').warn('请求 vxtwitter API 提取媒体直链失败:', apiErr)
+        }
+      }
 
       return {
         text: textContent,
