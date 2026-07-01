@@ -1,7 +1,7 @@
 {
   "name": "koishi-plugin-x",
-  "version": "0.0.1",
-  "description": "Combine the pros of twitter-fetcher and xanalyse, with ChatLuna translation",
+  "version": "0.0.2",
+  "description": "结合 twitter-fetcher 与 xanalyse 优点，支持 ChatLuna 大模型翻译与浏览器兜底截图的推特解析插件",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "files": [

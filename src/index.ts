@@ -66,7 +66,7 @@ export function apply(ctx: Context, config: Config) {
         const tweetId = match[1]
         try {
           await session.send('🔍 正在获取推文内容')
-          await processTweet(session, ctx, config, tweetId, chatLunaModel)
+          await processTweet(session, ctx, config, tweetId, chatLunaModel, url)
         } catch (e) {
           ctx.logger('twitter-ultimate').error(e)
           await session.send(`解析推文失败: ${e instanceof Error ? e.message : String(e)}`)
@@ -87,7 +87,7 @@ export function apply(ctx: Context, config: Config) {
       
       try {
         await session.send('🔍 正在获取推文内容')
-        await processTweet(session, ctx, config, match[1], chatLunaModel)
+        await processTweet(session, ctx, config, match[1], chatLunaModel, url)
         return
       } catch (e) {
         ctx.logger('twitter-ultimate').error(e)
@@ -97,8 +97,8 @@ export function apply(ctx: Context, config: Config) {
 }
 
 // 核心链路：抓取 -> 翻译 -> 截图渲染 -> 发送消息
-async function processTweet(session: Session, ctx: Context, config: Config, tweetId: string, chatLunaModel?: ComputedRef<ChatLunaChatModel>) {
-  const tweetUrl = `https://x.com/x/status/${tweetId}`
+async function processTweet(session: Session, ctx: Context, config: Config, tweetId: string, chatLunaModel?: ComputedRef<ChatLunaChatModel>, originalUrl?: string) {
+  const tweetUrl = originalUrl || `https://x.com/i/status/${tweetId}`
   let tweetText = ''
   let translatedText = ''
   let screenshotBuf: Buffer | null = null
@@ -223,116 +223,125 @@ async function processTweet(session: Session, ctx: Context, config: Config, twee
   }
 }
 
-// 模拟 xanalyse 浏览器登录截图与内容提取
-async function scrapeTweetWithCookie(ctx: Context, url: string, cookies: string) {
+// 模拟 xanalyse 浏览器登录截图与内容提取 (加入重试机制)
+async function scrapeTweetWithCookie(ctx: Context, url: string, cookies: string, maxRetries = 3) {
+  let attempts = 0
   let page: any
-  try {
-    page = await ctx.puppeteer.page()
-    await page.setCookie({
-      name: 'auth_token',
-      value: cookies,
-      domain: '.x.com',
-      path: '/',
-      httpOnly: true,
-      secure: true
-    })
-    await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36")
-    await page.setDefaultNavigationTimeout(60000)
-    await page.setDefaultTimeout(60000)
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 })
-    
-    // 等待推文容器渲染
-    await page.waitForSelector('article', { timeout: 30000 })
-    
-    // 等待图片加载
-    await page.evaluate(async () => {
-      const article = document.querySelector('article[data-testid="tweet"]') || document.querySelector('article')
-      if (!article) return
-      const imgs = Array.from(article.querySelectorAll('img'))
-      await Promise.all(imgs.map(img => {
-        if (img.complete && (img as HTMLImageElement).naturalWidth > 0) return Promise.resolve()
-        return new Promise(resolve => {
-          img.onload = img.onerror = resolve
-        })
-      }))
-    })
-
-    const element = await page.waitForSelector('article[data-testid="tweet"]', { timeout: 15000 })
-    if (!element) {
-      throw new Error('未能找到推文容器')
-    }
-
-    // 获取正文
-    const textContent = await page.evaluate(() => {
-      const el = document.querySelector('div[data-testid="tweetText"]')
-      return el ? el.textContent || '' : ''
-    })
-
-    // 截图逻辑 (直接从页面裁切)
-    let screenshotBuffer: Buffer
+  while (attempts < maxRetries) {
     try {
-      const box = await element.boundingBox()
-      if (box) {
-        const imgs = await element.$$('img')
-        let avatarBox = null
-        for (const img of imgs) {
-          try {
-            const ibox = await img.boundingBox()
-            if (!ibox) continue
-            const relTop = ibox.y - box.y
-            if (ibox.width <= 96 && relTop >= 0 && relTop <= 96) {
-              avatarBox = ibox
-              break
-            }
-          } catch (__) {}
+      page = await ctx.puppeteer.page()
+      await page.setCookie({
+        name: 'auth_token',
+        value: cookies,
+        domain: '.x.com',
+        path: '/',
+        httpOnly: true,
+        secure: true
+      })
+      await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36")
+      await page.setDefaultNavigationTimeout(60000)
+      await page.setDefaultTimeout(60000)
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 })
+      
+      // 等待推文容器渲染
+      await page.waitForSelector('article', { timeout: 30000 })
+      
+      // 等待图片加载
+      await page.evaluate(async () => {
+        const article = document.querySelector('article[data-testid="tweet"]') || document.querySelector('article')
+        if (!article) return
+        const imgs = Array.from(article.querySelectorAll('img'))
+        await Promise.all(imgs.map(img => {
+          if (img.complete && (img as HTMLImageElement).naturalWidth > 0) return Promise.resolve()
+          return new Promise(resolve => {
+            img.onload = img.onerror = resolve
+          })
+        }))
+      })
+
+      const element = await page.waitForSelector('article[data-testid="tweet"]', { timeout: 15000 })
+      if (!element) {
+        throw new Error('未能找到推文容器')
+      }
+
+      // 获取正文
+      const textContent = await page.evaluate(() => {
+        const el = document.querySelector('div[data-testid="tweetText"]')
+        return el ? el.textContent || '' : ''
+      })
+
+      // 截图逻辑 (直接从页面裁切)
+      let screenshotBuffer: Buffer
+      try {
+        const box = await element.boundingBox()
+        if (box) {
+          const imgs = await element.$$('img')
+          let avatarBox = null
+          for (const img of imgs) {
+            try {
+              const ibox = await img.boundingBox()
+              if (!ibox) continue
+              const relTop = ibox.y - box.y
+              if (ibox.width <= 96 && relTop >= 0 && relTop <= 96) {
+                avatarBox = ibox
+                break
+              }
+            } catch (__) {}
+          }
+          let leftMost = box.x
+          let topMost = box.y
+          let rightMost = box.x + box.width
+          let bottomMost = box.y + box.height
+          if (avatarBox) {
+            leftMost = Math.min(leftMost, avatarBox.x)
+            topMost = Math.min(topMost, avatarBox.y)
+            rightMost = Math.max(rightMost, avatarBox.x + avatarBox.width)
+            bottomMost = Math.max(bottomMost, avatarBox.y + avatarBox.height)
+          }
+          const pad = 12
+          const x = Math.max(0, Math.floor(leftMost - pad))
+          const y = Math.max(0, Math.floor(topMost - pad))
+          const width = Math.ceil(rightMost - leftMost + pad * 2)
+          const height = Math.ceil(bottomMost - topMost + pad * 2)
+          screenshotBuffer = await page.screenshot({ clip: { x, y, width, height }, type: "webp" })
+        } else {
+          screenshotBuffer = await element.screenshot({ type: "webp" })
         }
-        let leftMost = box.x
-        let topMost = box.y
-        let rightMost = box.x + box.width
-        let bottomMost = box.y + box.height
-        if (avatarBox) {
-          leftMost = Math.min(leftMost, avatarBox.x)
-          topMost = Math.min(topMost, avatarBox.y)
-          rightMost = Math.max(rightMost, avatarBox.x + avatarBox.width)
-          bottomMost = Math.max(bottomMost, avatarBox.y + avatarBox.height)
-        }
-        const pad = 12
-        const x = Math.max(0, Math.floor(leftMost - pad))
-        const y = Math.max(0, Math.floor(topMost - pad))
-        const width = Math.ceil(rightMost - leftMost + pad * 2)
-        const height = Math.ceil(bottomMost - topMost + pad * 2)
-        screenshotBuffer = await page.screenshot({ clip: { x, y, width, height }, type: "webp" })
-      } else {
+      } catch (e) {
         screenshotBuffer = await element.screenshot({ type: "webp" })
       }
+
+      // 从 DOM 提取可能的媒体资源链接
+      const mediaUrls = await page.evaluate(() => {
+        const urls: string[] = []
+        const images = document.querySelectorAll('article[data-testid="tweet"] img[src*="pbs.twimg.com/media/"]')
+        images.forEach(img => {
+          const src = img.getAttribute('src')
+          if (src) urls.push(src)
+        })
+        const videos = document.querySelectorAll('article[data-testid="tweet"] video')
+        videos.forEach(v => {
+          const src = v.getAttribute('src')
+          if (src) urls.push(src)
+        })
+        return urls
+      })
+
+      return {
+        text: textContent,
+        screenshot: screenshotBuffer,
+        mediaUrls: mediaUrls
+      }
     } catch (e) {
-      screenshotBuffer = await element.screenshot({ type: "webp" })
+      attempts++
+      ctx.logger('twitter-ultimate').warn(`浏览器截图第 ${attempts} 次尝试失败: ${e instanceof Error ? e.message : String(e)}`)
+      if (page) await page.close().catch(() => {})
+      if (attempts >= maxRetries) throw e
+      // 等待 3 秒后重试
+      await new Promise(resolve => setTimeout(resolve, 3000))
     }
-
-    // 从 DOM 提取可能的媒体资源链接
-    const mediaUrls = await page.evaluate(() => {
-      const urls: string[] = []
-      const images = document.querySelectorAll('article[data-testid="tweet"] img[src*="pbs.twimg.com/media/"]')
-      images.forEach(img => {
-        const src = img.getAttribute('src')
-        if (src) urls.push(src)
-      })
-      const videos = document.querySelectorAll('article[data-testid="tweet"] video')
-      videos.forEach(v => {
-        const src = v.getAttribute('src')
-        if (src) urls.push(src)
-      })
-      return urls
-    })
-
-    return {
-      text: textContent,
-      screenshot: screenshotBuffer,
-      mediaUrls: mediaUrls
-    }
-  } finally {
-    if (page) await page.close().catch(() => {})
   }
+  throw new Error('未能生成推文截图')
 }
 
 async function translate(text: string, ctx: Context, config: Config, chatLunaModel: ComputedRef<ChatLunaChatModel>) {
