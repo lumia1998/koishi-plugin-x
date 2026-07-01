@@ -65,7 +65,7 @@ export function apply(ctx: Context, config: Config) {
         const url = match[0]
         const tweetId = match[1]
         try {
-          await session.send('🔍 正在解析推文并生成截图...')
+          await session.send('🔍 正在获取推文内容')
           await processTweet(session, ctx, config, tweetId, chatLunaModel)
         } catch (e) {
           ctx.logger('twitter-ultimate').error(e)
@@ -86,7 +86,7 @@ export function apply(ctx: Context, config: Config) {
       if (!match) return '不是有效的推文链接！'
       
       try {
-        await session.send('🔍 正在解析推文并生成截图...')
+        await session.send('🔍 正在获取推文内容')
         await processTweet(session, ctx, config, match[1], chatLunaModel)
         return
       } catch (e) {
