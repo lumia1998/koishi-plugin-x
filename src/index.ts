@@ -3,6 +3,12 @@ import { Context, Schema, h } from 'koishi'
 export const name = 'x'
 export const inject = ['puppeteer', 'chatluna']
 
+declare module 'koishi' {
+  interface Context {
+    puppeteer: any
+  }
+}
+
 export interface Config {
   detectXLinks: boolean
   enableTranslation: boolean
@@ -13,7 +19,7 @@ export interface Config {
 export const Config: Schema<Config> = Schema.object({
   detectXLinks: Schema.boolean().default(true).description('是否自动解析聊天中的 x.com / twitter.com 链接'),
   enableTranslation: Schema.boolean().default(true).description('是否使用 ChatLuna 翻译推文内容'),
-  translationPrompt: Schema.string().role('textarea').default('你是一个二次元宅和网络梗专家，请将以下推文准确地翻译为中文，保持原有的语气和幽默感：').description('传递给 ChatLuna 的翻译提示词'),
+  translationPrompt: Schema.string().role('textarea').default('请将以下推文准确、通顺地翻译为中文，保留推文的原始含义与语气，不要过度解读：').description('传递给 ChatLuna 的翻译提示词'),
   fetchApi: Schema.union(['fxtwitter', 'vxtwitter']).default('fxtwitter').description('推文解析使用的底层 API (默认推荐 fxtwitter)')
 }).description('基础设置')
 
@@ -21,7 +27,7 @@ export function apply(ctx: Context, config: Config) {
   // 核心功能 1: 自动解析链接
   if (config.detectXLinks) {
     ctx.middleware(async (session, next) => {
-      const content = session.content
+      const content = session.content || ''
       const twitterRegex = /https?:\/\/(?:www\.)?(?:twitter\.com|x\.com)\/[a-zA-Z0-9_]+\/status\/(\d+)/
       const match = content.match(twitterRegex)
       
@@ -34,7 +40,7 @@ export function apply(ctx: Context, config: Config) {
           await session.send(result)
         } catch (e) {
           ctx.logger('twitter-ultimate').error(e)
-          await session.send(`解析推文失败: ${e.message}`)
+          await session.send(`解析推文失败: ${e instanceof Error ? e.message : String(e)}`)
         }
       }
       return next()
@@ -45,6 +51,7 @@ export function apply(ctx: Context, config: Config) {
   ctx.command('twitter <url:string>', '解析并翻译推文')
     .alias('x')
     .action(async ({ session }, url) => {
+      if (!session) return
       if (!url) return '请输入推特链接'
       const match = url.match(/(?:twitter\.com|x\.com)\/[a-zA-Z0-9_]+\/status\/(\d+)/)
       if (!match) return '不是有效的推文链接！'
@@ -54,7 +61,7 @@ export function apply(ctx: Context, config: Config) {
         return await processTweet(ctx, config, match[1])
       } catch (e) {
         ctx.logger('twitter-ultimate').error(e)
-        return `解析推文失败: ${e.message}`
+        return `解析推文失败: ${e instanceof Error ? e.message : String(e)}`
       }
     })
 }
@@ -98,7 +105,7 @@ async function processTweet(ctx: Context, config: Config, tweetId: string) {
   const authorName = tweet.author?.name || 'Unknown'
   const screenName = tweet.author?.screen_name || 'unknown'
   const textContent = tweet.text || ''
-  const mediaElements = (tweet.media?.all || []).map(m => `<img src="${m.url}" style="max-width: 100%; border-radius: 12px; margin-top: 8px;">`).join('')
+  const mediaElements = (tweet.media?.all || []).map((m: any) => `<img src="${m.url}" style="max-width: 100%; border-radius: 12px; margin-top: 8px;">`).join('')
 
   const html = `
     <!DOCTYPE html>
@@ -148,7 +155,7 @@ async function processTweet(ctx: Context, config: Config, tweetId: string) {
   const resultElements = [h.image(imageBuf, 'image/png')]
 
   // 若有视频等多媒体，可以在这里单独提取发送 (借鉴 twitter-fetcher)
-  const videos = tweet.media?.all?.filter(m => m.type === 'video' || m.type === 'gif') || []
+  const videos = tweet.media?.all?.filter((m: any) => m.type === 'video' || m.type === 'gif') || []
   for (const v of videos) {
     if (v.url) {
       resultElements.push(h.video(v.url))
