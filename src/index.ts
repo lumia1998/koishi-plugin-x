@@ -108,7 +108,11 @@ async function processTweet(session: Session, ctx: Context, config: Config, twee
 
   // 1. 尝试使用 API 模式 (vxtwitter)
   try {
-    const response = await ctx.http.get(`https://api.vxtwitter.com/i/status/${tweetId}`)
+    const response = await ctx.http.get(`https://api.vxtwitter.com/i/status/${tweetId}`, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+      }
+    })
     
     if (response && response.tweet) {
       const tweet = response.tweet
