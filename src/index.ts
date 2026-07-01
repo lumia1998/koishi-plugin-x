@@ -17,7 +17,6 @@ export interface Config {
   enableTranslation: boolean
   model: string
   translationPrompt: string
-  fetchApi: 'fxtwitter' | 'vxtwitter'
   cookies?: string
 }
 
@@ -28,7 +27,6 @@ export const Config: Schema<Config> = Schema.object({
   enableTranslation: Schema.boolean().default(true).description('是否使用 ChatLuna 翻译推文内容'),
   model: Schema.dynamic('model').description('使用的大语言模型名称 (需要通过 ChatLuna 先配置并启用)'),
   translationPrompt: Schema.string().role('textarea').default(DEFAULT_PROMPT).description('传递给 ChatLuna 的翻译提示词，可以使用 {text} 作为推文占位符'),
-  fetchApi: Schema.union(['fxtwitter', 'vxtwitter']).default('vxtwitter').description('推文解析默认使用的底层 API'),
   cookies: Schema.string().role('secret').description('Twitter/X 登录 Cookie (auth_token)，用于 API 解析失败时通过浏览器截图进行兜底')
 }).description('基础设置')
 
@@ -107,10 +105,9 @@ async function processTweet(ctx: Context, config: Config, tweetId: string, chatL
   let mediaUrls: string[] = []
   let isApiSuccess = false
 
-  // 1. 尝试使用 API 模式 (fxtwitter / vxtwitter)
+  // 1. 尝试使用 API 模式 (固定使用 vxtwitter)
   try {
-    const apiDomain = config.fetchApi === 'fxtwitter' ? 'api.fxtwitter.com' : 'api.vxtwitter.com'
-    const response = await ctx.http.get(`https://${apiDomain}/i/status/${tweetId}`)
+    const response = await ctx.http.get(`https://api.vxtwitter.com/i/status/${tweetId}`)
     
     if (response && response.tweet) {
       const tweet = response.tweet
