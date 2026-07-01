@@ -221,7 +221,7 @@ async function processTweet(session: Session, ctx: Context, config: Config, twee
 
   // 消息 2: 内容翻译
   if (translatedText) {
-    await session.send(`📝 AI 翻译:\n${translatedText}`)
+    await session.send(translatedText)
   }
 
   // 消息 3: 视频
