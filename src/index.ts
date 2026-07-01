@@ -18,14 +18,18 @@ export interface Config {
   model: string
   translationPrompt: string
   fetchApi: 'fxtwitter' | 'vxtwitter'
+  cookies?: string
 }
+
+const DEFAULT_PROMPT = '你是精通多国语言与互联网文化的推文翻译专家。请将输入的内容准确、通顺地翻译为简体中文，仅输出译文，不要附加解释。可根据语境适度润色以符合中文阅读习惯，但需保留原文格式（换行、段落、标点）并保留推文的原始含义与语气。保留网址、emoji、#话题标签原样，不翻译人名或其代称。若内容为空、仅含链接、仅占位符或无有效文本，请不要翻译并直接输出空内容。请翻译：{text}'
 
 export const Config: Schema<Config> = Schema.object({
   detectXLinks: Schema.boolean().default(true).description('是否自动解析聊天中的 x.com / twitter.com 链接'),
   enableTranslation: Schema.boolean().default(true).description('是否使用 ChatLuna 翻译推文内容'),
   model: Schema.dynamic('model').description('使用的大语言模型名称 (需要通过 ChatLuna 先配置并启用)'),
-  translationPrompt: Schema.string().role('textarea').default('请将以下推文准确、通顺地翻译为中文，保留推文的原始含义与语气，不要过度解读：').description('传递给 ChatLuna 的翻译提示词'),
-  fetchApi: Schema.union(['fxtwitter', 'vxtwitter']).default('fxtwitter').description('推文解析使用的底层 API (默认推荐 fxtwitter)')
+  translationPrompt: Schema.string().role('textarea').default(DEFAULT_PROMPT).description('传递给 ChatLuna 的翻译提示词，可以使用 {text} 作为推文占位符'),
+  fetchApi: Schema.union(['fxtwitter', 'vxtwitter']).default('vxtwitter').description('推文解析默认使用的底层 API'),
+  cookies: Schema.string().role('secret').description('Twitter/X 登录 Cookie (auth_token)，用于 API 解析失败时通过浏览器截图进行兜底')
 }).description('基础设置')
 
 export function apply(ctx: Context, config: Config) {
@@ -63,7 +67,7 @@ export function apply(ctx: Context, config: Config) {
         const url = match[0]
         const tweetId = match[1]
         try {
-          await session.send('🔍 正在通过 Ultimate 引擎解析推文并生成截图...')
+          await session.send('🔍 正在解析推文并生成截图...')
           const result = await processTweet(ctx, config, tweetId, chatLunaModel)
           await session.send(result)
         } catch (e) {
@@ -85,7 +89,7 @@ export function apply(ctx: Context, config: Config) {
       if (!match) return '不是有效的推文链接！'
       
       try {
-        await session.send('🔍 正在通过 Ultimate 引擎解析推文并生成截图...')
+        await session.send('🔍 正在解析推文并生成截图...')
         return await processTweet(ctx, config, match[1], chatLunaModel)
       } catch (e) {
         ctx.logger('twitter-ultimate').error(e)
@@ -96,102 +100,251 @@ export function apply(ctx: Context, config: Config) {
 
 // 核心链路：抓取 -> 翻译 -> 截图渲染 -> 返回消息元素
 async function processTweet(ctx: Context, config: Config, tweetId: string, chatLunaModel?: ComputedRef<ChatLunaChatModel>) {
-  // 1. 抓取推文数据 (借鉴 twitter-fetcher 的 API 模式)
-  const apiDomain = config.fetchApi === 'fxtwitter' ? 'api.fxtwitter.com' : 'api.vxtwitter.com'
-  const response = await ctx.http.get(`https://${apiDomain}/i/status/${tweetId}`)
-  
-  if (!response || !response.tweet) {
-    throw new Error('未获取到推文数据')
-  }
-
-  const tweet = response.tweet
+  const tweetUrl = `https://x.com/x/status/${tweetId}`
+  let tweetText = ''
   let translatedText = ''
+  let screenshotBuf: Buffer | null = null
+  let mediaUrls: string[] = []
+  let isApiSuccess = false
 
-  // 2. ChatLuna AI 翻译 (借鉴 xanalyse 的翻译模式)
-  if (config.enableTranslation && tweet.text) {
-    if (chatLunaModel && chatLunaModel.value) {
-      try {
-        translatedText = await translate(tweet.text, ctx, config, chatLunaModel)
-        ctx.logger('twitter-ultimate').info('ChatLuna 翻译完成')
-      } catch (e) {
-        ctx.logger('twitter-ultimate').warn('翻译请求失败: ' + e)
+  // 1. 尝试使用 API 模式 (fxtwitter / vxtwitter)
+  try {
+    const apiDomain = config.fetchApi === 'fxtwitter' ? 'api.fxtwitter.com' : 'api.vxtwitter.com'
+    const response = await ctx.http.get(`https://${apiDomain}/i/status/${tweetId}`)
+    
+    if (response && response.tweet) {
+      const tweet = response.tweet
+      tweetText = tweet.text || ''
+      mediaUrls = (tweet.media?.all || []).map((m: any) => m.url)
+      
+      // 2. 本地 HTML 渲染截图
+      const avatarUrl = tweet.author?.avatar_url || ''
+      const authorName = tweet.author?.name || 'Unknown'
+      const screenName = tweet.author?.screen_name || 'unknown'
+      
+      // AI 翻译
+      if (config.enableTranslation && tweetText) {
+        if (chatLunaModel && chatLunaModel.value) {
+          try {
+            translatedText = await translate(tweetText, ctx, config, chatLunaModel)
+          } catch (e) {
+            ctx.logger('twitter-ultimate').warn('翻译失败: ' + e)
+          }
+        }
       }
-    } else {
-      ctx.logger('twitter-ultimate').warn('未检测到有效 ChatLuna 翻译模型，跳过智能翻译')
+
+      const mediaElements = mediaUrls.map((url) => `<img src="${url}" style="max-width: 100%; border-radius: 12px; margin-top: 8px;">`).join('')
+
+      const html = `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta charset="utf-8">
+          <style>
+            body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f0f3f5; padding: 20px; display: flex; justify-content: center; }
+            .card { background: white; border-radius: 16px; padding: 24px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); max-width: 500px; width: 100%; }
+            .header { display: flex; align-items: center; margin-bottom: 16px; }
+            .avatar { width: 48px; height: 48px; border-radius: 50%; margin-right: 12px; }
+            .names { display: flex; flex-direction: column; }
+            .name { font-weight: bold; font-size: 16px; color: #0f1419; }
+            .handle { color: #536471; font-size: 14px; }
+            .content { font-size: 16px; color: #0f1419; white-space: pre-wrap; line-height: 1.5; margin-bottom: 12px; }
+            .translation { background: #f7f9f9; padding: 12px; border-radius: 8px; font-size: 15px; color: #1d9bf0; margin-bottom: 12px; border-left: 4px solid #1d9bf0;}
+            .media { display: flex; flex-direction: column; gap: 8px; }
+            .footer { margin-top: 16px; color: #536471; font-size: 14px; }
+          </style>
+        </head>
+        <body>
+          <div class="card" id="tweet-card">
+            <div class="header">
+              <img class="avatar" src="${avatarUrl}" />
+              <div class="names">
+                <span class="name">${authorName}</span>
+                <span class="handle">@${screenName}</span>
+              </div>
+            </div>
+            <div class="content">${tweetText}</div>
+            ${translatedText ? `<div class="translation"><strong>AI 翻译:</strong><br>${translatedText}</div>` : ''}
+            <div class="media">
+              ${mediaElements}
+            </div>
+            <div class="footer">Koishi Twitter Ultimate (API Mode)</div>
+          </div>
+        </body>
+        </html>
+      `
+
+      screenshotBuf = await ctx.puppeteer.render(html, {
+        waitUntil: 'networkidle0'
+      })
+      isApiSuccess = true
+    }
+  } catch (e) {
+    ctx.logger('twitter-ultimate').warn(`API 模式解析失败，将尝试使用 Cookie 浏览器截图进行兜底。错误原因: ${e instanceof Error ? e.message : String(e)}`)
+  }
+
+  // 3. API 失败时，使用 Cookie 浏览器截图进行兜底 (xanalyse 方式)
+  if (!isApiSuccess) {
+    if (!config.cookies) {
+      throw new Error('API 解析失败，且未配置用于浏览器兜底的 Cookie (auth_token)，请在插件设置中填入 Cookie。')
+    }
+    
+    ctx.logger('twitter-ultimate').info('启动浏览器进行推特页面截图与内容抓取...')
+    const scraped = await scrapeTweetWithCookie(ctx, tweetUrl, config.cookies)
+    tweetText = scraped.text
+    screenshotBuf = scraped.screenshot
+    mediaUrls = scraped.mediaUrls
+
+    // 再次翻译
+    if (config.enableTranslation && tweetText) {
+      if (chatLunaModel && chatLunaModel.value) {
+        try {
+          translatedText = await translate(tweetText, ctx, config, chatLunaModel)
+        } catch (e) {
+          ctx.logger('twitter-ultimate').warn('翻译失败: ' + e)
+        }
+      }
     }
   }
 
-  // 3. Puppeteer 卡片渲染 (借鉴 xanalyse 的排版模式)
-  // 我们自己生成一个优美的 HTML，避免了连官网 x.com 经常被封杀或需要复杂代理的痛点
-  const avatarUrl = tweet.author?.avatar_url || ''
-  const authorName = tweet.author?.name || 'Unknown'
-  const screenName = tweet.author?.screen_name || 'unknown'
-  const textContent = tweet.text || ''
-  const mediaElements = (tweet.media?.all || []).map((m: any) => `<img src="${m.url}" style="max-width: 100%; border-radius: 12px; margin-top: 8px;">`).join('')
+  if (!screenshotBuf) {
+    throw new Error('未能生成推文截图')
+  }
 
-  const html = `
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <meta charset="utf-8">
-      <style>
-        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f0f3f5; padding: 20px; display: flex; justify-content: center; }
-        .card { background: white; border-radius: 16px; padding: 24px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); max-width: 500px; width: 100%; }
-        .header { display: flex; align-items: center; margin-bottom: 16px; }
-        .avatar { width: 48px; height: 48px; border-radius: 50%; margin-right: 12px; }
-        .names { display: flex; flex-direction: column; }
-        .name { font-weight: bold; font-size: 16px; color: #0f1419; }
-        .handle { color: #536471; font-size: 14px; }
-        .content { font-size: 16px; color: #0f1419; white-space: pre-wrap; line-height: 1.5; margin-bottom: 12px; }
-        .translation { background: #f7f9f9; padding: 12px; border-radius: 8px; font-size: 15px; color: #1d9bf0; margin-bottom: 12px; border-left: 4px solid #1d9bf0;}
-        .media { display: flex; flex-direction: column; gap: 8px; }
-        .footer { margin-top: 16px; color: #536471; font-size: 14px; }
-      </style>
-    </head>
-    <body>
-      <div class="card" id="tweet-card">
-        <div class="header">
-          <img class="avatar" src="${avatarUrl}" />
-          <div class="names">
-            <span class="name">${authorName}</span>
-            <span class="handle">@${screenName}</span>
-          </div>
-        </div>
-        <div class="content">${textContent}</div>
-        ${translatedText ? `<div class="translation"><strong>AI 翻译:</strong><br>${translatedText}</div>` : ''}
-        <div class="media">
-          ${mediaElements}
-        </div>
-        <div class="footer">Koishi Twitter Ultimate</div>
-      </div>
-    </body>
-    </html>
-  `
+  // 4. 组装返回结果
+  const resultElements = [h.image(screenshotBuf, 'image/png')]
 
-  // 截图生成
-  const imageBuf = await ctx.puppeteer.render(html, {
-    waitUntil: 'networkidle0'
-  })
+  // 如果是用真实的推特页面截图，翻译文本无法画在图里，所以我们额外追加一段文字消息发送
+  if (!isApiSuccess && translatedText) {
+    resultElements.push(h.text(`\n📝 AI 翻译:\n${translatedText}\n`))
+  }
 
-  // 组合最终消息：截图 (已经包含原图、头像、翻译、排版)
-  const resultElements = [h.image(imageBuf, 'image/png')]
-
-  // 若有视频等多媒体，可以在这里单独提取发送 (借鉴 twitter-fetcher)
-  const videos = tweet.media?.all?.filter((m: any) => m.type === 'video' || m.type === 'gif') || []
+  // 发送视频
+  const videos = mediaUrls.filter((url) => url.includes('.mp4') || url.includes('video.twimg.com'))
   for (const v of videos) {
-    if (v.url) {
-      resultElements.push(h.video(v.url))
-    }
+    resultElements.push(h.video(v))
   }
 
   return resultElements
 }
 
+// 模拟 xanalyse 浏览器登录截图与内容提取
+async function scrapeTweetWithCookie(ctx: Context, url: string, cookies: string) {
+  let page: any
+  try {
+    page = await ctx.puppeteer.page()
+    await page.setCookie({
+      name: 'auth_token',
+      value: cookies,
+      domain: '.x.com',
+      path: '/',
+      httpOnly: true,
+      secure: true
+    })
+    await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36")
+    await page.setDefaultNavigationTimeout(60000)
+    await page.setDefaultTimeout(60000)
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 })
+    
+    // 等待推文容器渲染
+    await page.waitForSelector('article', { timeout: 30000 })
+    
+    // 等待图片加载
+    await page.evaluate(async () => {
+      const article = document.querySelector('article[data-testid="tweet"]') || document.querySelector('article')
+      if (!article) return
+      const imgs = Array.from(article.querySelectorAll('img'))
+      await Promise.all(imgs.map(img => {
+        if (img.complete && (img as HTMLImageElement).naturalWidth > 0) return Promise.resolve()
+        return new Promise(resolve => {
+          img.onload = img.onerror = resolve
+        })
+      }))
+    })
+
+    const element = await page.waitForSelector('article[data-testid="tweet"]', { timeout: 15000 })
+    if (!element) {
+      throw new Error('未能找到推文容器')
+    }
+
+    // 获取正文
+    const textContent = await page.evaluate(() => {
+      const el = document.querySelector('div[data-testid="tweetText"]')
+      return el ? el.textContent || '' : ''
+    })
+
+    // 截图逻辑 (直接从页面裁切)
+    let screenshotBuffer: Buffer
+    try {
+      const box = await element.boundingBox()
+      if (box) {
+        const imgs = await element.$$('img')
+        let avatarBox = null
+        for (const img of imgs) {
+          try {
+            const ibox = await img.boundingBox()
+            if (!ibox) continue
+            const relTop = ibox.y - box.y
+            if (ibox.width <= 96 && relTop >= 0 && relTop <= 96) {
+              avatarBox = ibox
+              break
+            }
+          } catch (__) {}
+        }
+        let leftMost = box.x
+        let topMost = box.y
+        let rightMost = box.x + box.width
+        let bottomMost = box.y + box.height
+        if (avatarBox) {
+          leftMost = Math.min(leftMost, avatarBox.x)
+          topMost = Math.min(topMost, avatarBox.y)
+          rightMost = Math.max(rightMost, avatarBox.x + avatarBox.width)
+          bottomMost = Math.max(bottomMost, avatarBox.y + avatarBox.height)
+        }
+        const pad = 12
+        const x = Math.max(0, Math.floor(leftMost - pad))
+        const y = Math.max(0, Math.floor(topMost - pad))
+        const width = Math.ceil(rightMost - leftMost + pad * 2)
+        const height = Math.ceil(bottomMost - topMost + pad * 2)
+        screenshotBuffer = await page.screenshot({ clip: { x, y, width, height }, type: "webp" })
+      } else {
+        screenshotBuffer = await element.screenshot({ type: "webp" })
+      }
+    } catch (e) {
+      screenshotBuffer = await element.screenshot({ type: "webp" })
+    }
+
+    // 从 DOM 提取可能的媒体资源链接
+    const mediaUrls = await page.evaluate(() => {
+      const urls: string[] = []
+      const images = document.querySelectorAll('article[data-testid="tweet"] img[src*="pbs.twimg.com/media/"]')
+      images.forEach(img => {
+        const src = img.getAttribute('src')
+        if (src) urls.push(src)
+      })
+      const videos = document.querySelectorAll('article[data-testid="tweet"] video')
+      videos.forEach(v => {
+        const src = v.getAttribute('src')
+        if (src) urls.push(src)
+      })
+      return urls
+    })
+
+    return {
+      text: textContent,
+      screenshot: screenshotBuffer,
+      mediaUrls: mediaUrls
+    }
+  } finally {
+    if (page) await page.close().catch(() => {})
+  }
+}
+
 async function translate(text: string, ctx: Context, config: Config, chatLunaModel: ComputedRef<ChatLunaChatModel>) {
   const { HumanMessage } = await import('@langchain/core/messages')
-  const promptTemplate = config.translationPrompt || '请将以下推文准确、通顺地翻译为中文，保留推文的原始含义与语气，不要过度解读：'
+  const promptTemplate = config.translationPrompt || DEFAULT_PROMPT
   const response = await chatLunaModel.value.invoke([
-    new HumanMessage(promptTemplate + '\n' + text) as any
+    new HumanMessage(promptTemplate.replace('{text}', text)) as any
   ])
   if (response && response.content) {
     return typeof response.content === 'string'
