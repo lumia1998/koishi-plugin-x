@@ -1,4 +1,6 @@
 import { Context, Schema, h } from 'koishi'
+import type { ChatLunaChatModel } from 'koishi-plugin-chatluna/lib/llm-core/platform/model'
+import type { ComputedRef } from 'koishi-plugin-chatluna'
 
 export const name = 'x'
 export const inject = ['puppeteer', 'chatluna']
@@ -6,12 +8,14 @@ export const inject = ['puppeteer', 'chatluna']
 declare module 'koishi' {
   interface Context {
     puppeteer: any
+    chatluna: any
   }
 }
 
 export interface Config {
   detectXLinks: boolean
   enableTranslation: boolean
+  model: string
   translationPrompt: string
   fetchApi: 'fxtwitter' | 'vxtwitter'
 }
@@ -19,11 +23,35 @@ export interface Config {
 export const Config: Schema<Config> = Schema.object({
   detectXLinks: Schema.boolean().default(true).description('是否自动解析聊天中的 x.com / twitter.com 链接'),
   enableTranslation: Schema.boolean().default(true).description('是否使用 ChatLuna 翻译推文内容'),
+  model: Schema.dynamic('model').description('使用的大语言模型名称 (需要通过 ChatLuna 先配置并启用)'),
   translationPrompt: Schema.string().role('textarea').default('请将以下推文准确、通顺地翻译为中文，保留推文的原始含义与语气，不要过度解读：').description('传递给 ChatLuna 的翻译提示词'),
   fetchApi: Schema.union(['fxtwitter', 'vxtwitter']).default('fxtwitter').description('推文解析使用的底层 API (默认推荐 fxtwitter)')
 }).description('基础设置')
 
 export function apply(ctx: Context, config: Config) {
+  let chatLunaModel: ComputedRef<ChatLunaChatModel>
+
+  const loadModel = async () => {
+    try {
+      if (config.enableTranslation && config.model) {
+        chatLunaModel = await ctx.chatluna.createChatModel(config.model)
+      }
+    } catch (e) {
+      ctx.logger('twitter-ultimate').error('加载 ChatLuna 模型时出错：', e)
+    }
+  }
+
+  // 动态导入 modelSchema
+  import('koishi-plugin-chatluna/utils/schema' as any).then(({ modelSchema }) => {
+    modelSchema(ctx)
+  }).catch(err => {
+    ctx.logger('twitter-ultimate').error('Failed to load chatluna modelSchema', err)
+  })
+
+  ctx.on('ready', async () => {
+    await loadModel()
+  })
+
   // 核心功能 1: 自动解析链接
   if (config.detectXLinks) {
     ctx.middleware(async (session, next) => {
@@ -36,7 +64,7 @@ export function apply(ctx: Context, config: Config) {
         const tweetId = match[1]
         try {
           await session.send('🔍 正在通过 Ultimate 引擎解析推文并生成截图...')
-          const result = await processTweet(ctx, config, tweetId)
+          const result = await processTweet(ctx, config, tweetId, chatLunaModel)
           await session.send(result)
         } catch (e) {
           ctx.logger('twitter-ultimate').error(e)
@@ -58,7 +86,7 @@ export function apply(ctx: Context, config: Config) {
       
       try {
         await session.send('🔍 正在通过 Ultimate 引擎解析推文并生成截图...')
-        return await processTweet(ctx, config, match[1])
+        return await processTweet(ctx, config, match[1], chatLunaModel)
       } catch (e) {
         ctx.logger('twitter-ultimate').error(e)
         return `解析推文失败: ${e instanceof Error ? e.message : String(e)}`
@@ -67,7 +95,7 @@ export function apply(ctx: Context, config: Config) {
 }
 
 // 核心链路：抓取 -> 翻译 -> 截图渲染 -> 返回消息元素
-async function processTweet(ctx: Context, config: Config, tweetId: string) {
+async function processTweet(ctx: Context, config: Config, tweetId: string, chatLunaModel?: ComputedRef<ChatLunaChatModel>) {
   // 1. 抓取推文数据 (借鉴 twitter-fetcher 的 API 模式)
   const apiDomain = config.fetchApi === 'fxtwitter' ? 'api.fxtwitter.com' : 'api.vxtwitter.com'
   const response = await ctx.http.get(`https://${apiDomain}/i/status/${tweetId}`)
@@ -81,21 +109,15 @@ async function processTweet(ctx: Context, config: Config, tweetId: string) {
 
   // 2. ChatLuna AI 翻译 (借鉴 xanalyse 的翻译模式)
   if (config.enableTranslation && tweet.text) {
-    // 这里我们做一层简单的依赖探测和桥接
-    // @ts-ignore: 由于没有强依赖 chatluna 类型，使用any绕过类型检查
-    const chatluna = ctx['chatluna']
-    if (chatluna) {
+    if (chatLunaModel && chatLunaModel.value) {
       try {
-        // 此处为伪代码/假定 API，实际需根据 chatluna 当前版本的 invoke 方法调用
-        // 假设通过某种方式调用大模型进行翻译
-        // translatedText = await chatluna.chat({ message: config.translationPrompt + '\n' + tweet.text })
-        translatedText = '【ChatLuna翻译占位】' + tweet.text + ' (翻译成功)'
+        translatedText = await translate(tweet.text, ctx, config, chatLunaModel)
         ctx.logger('twitter-ultimate').info('ChatLuna 翻译完成')
       } catch (e) {
         ctx.logger('twitter-ultimate').warn('翻译请求失败: ' + e)
       }
     } else {
-      ctx.logger('twitter-ultimate').warn('未检测到 chatluna 插件，跳过智能翻译')
+      ctx.logger('twitter-ultimate').warn('未检测到有效 ChatLuna 翻译模型，跳过智能翻译')
     }
   }
 
@@ -163,4 +185,18 @@ async function processTweet(ctx: Context, config: Config, tweetId: string) {
   }
 
   return resultElements
+}
+
+async function translate(text: string, ctx: Context, config: Config, chatLunaModel: ComputedRef<ChatLunaChatModel>) {
+  const { HumanMessage } = await import('@langchain/core/messages')
+  const promptTemplate = config.translationPrompt || '请将以下推文准确、通顺地翻译为中文，保留推文的原始含义与语气，不要过度解读：'
+  const response = await chatLunaModel.value.invoke([
+    new HumanMessage(promptTemplate + '\n' + text) as any
+  ])
+  if (response && response.content) {
+    return typeof response.content === 'string'
+      ? response.content
+      : JSON.stringify(response.content)
+  }
+  throw new Error('模型未返回任何内容')
 }
