@@ -15,8 +15,7 @@
     "koishi": "^4.17.0"
   },
   "peerDependencies": {
-    "koishi": "^4.17.0",
-    "koishi-plugin-puppeteer": "^3.0.0"
+    "koishi": "^4.17.0"
   },
   "koishi": {
     "description": "推特X终极插件：精美截图 + ChatLuna大模型翻译",
