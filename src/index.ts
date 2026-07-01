@@ -311,16 +311,16 @@ async function scrapeTweetWithCookie(ctx: Context, url: string, cookies: string,
         screenshotBuffer = await element.screenshot({ type: "webp" })
       }
 
-      // 从 DOM 提取可能的媒体资源链接
-      const mediaUrls = await page.evaluate(() => {
+      // 从 DOM 提取仅属于该推文的媒体资源链接 (避免抓取到下方回复中的表情包/视频)
+      const mediaUrls = await element.evaluate((el: any) => {
         const urls: string[] = []
-        const images = document.querySelectorAll('article[data-testid="tweet"] img[src*="pbs.twimg.com/media/"]')
-        images.forEach(img => {
+        const images = el.querySelectorAll('img[src*="pbs.twimg.com/media/"]')
+        images.forEach((img: any) => {
           const src = img.getAttribute('src')
           if (src) urls.push(src)
         })
-        const videos = document.querySelectorAll('article[data-testid="tweet"] video')
-        videos.forEach(v => {
+        const videos = el.querySelectorAll('video')
+        videos.forEach((v: any) => {
           const src = v.getAttribute('src')
           if (src) urls.push(src)
         })
