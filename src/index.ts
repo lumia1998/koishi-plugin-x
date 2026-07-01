@@ -280,6 +280,11 @@ async function scrapeTweetWithCookie(ctx: Context, url: string, cookies: string,
         throw new Error('未能找到推文容器')
       }
 
+      // 检查是否为受保护账号
+      const isProtected = await page.evaluate(() => {
+        return !!document.querySelector('[aria-label="受保护账号"]')
+      })
+
       // 获取正文 (仅从主推文中获取，避免主推文无文字时误抓下方回复的文字)
       const textContent = await element.evaluate((el: any) => {
         const textEl = el.querySelector('div[data-testid="tweetText"]')
@@ -327,21 +332,25 @@ async function scrapeTweetWithCookie(ctx: Context, url: string, cookies: string,
         screenshotBuffer = await element.screenshot({ type: "webp" })
       }
 
-      // 从 DOM 提取仅属于该推文的媒体资源链接 (避免抓取到下方回复中的表情包/视频)
-      const mediaUrls = await element.evaluate((el: any) => {
-        const urls: string[] = []
-        const images = el.querySelectorAll('img[src*="pbs.twimg.com/media/"]')
-        images.forEach((img: any) => {
-          const src = img.getAttribute('src')
-          if (src) urls.push(src)
-        })
-        const videos = el.querySelectorAll('video')
-        videos.forEach((v: any) => {
-          const src = v.getAttribute('src')
-          if (src) urls.push(src)
-        })
-        return urls
-      })
+      // 获取媒体列表：如果是受保护账号，不获取视频。否则在浏览器内调用 vxtwitter API（避免 Node 请求时被 Cloudflare 拦截，同时避开页面 DOM 的 blob: 视频链接）
+      let mediaUrls: string[] = []
+      if (!isProtected) {
+        const apiUrl = url.replace(/(twitter\.com|x\.com)/, 'api.vxtwitter.com')
+        try {
+          const apiPage = await page.browser().newPage()
+          await apiPage.setUserAgent(await page.evaluate(() => navigator.userAgent))
+          await apiPage.goto(apiUrl, { waitUntil: 'domcontentloaded', timeout: 30000 })
+          const bodyText = await apiPage.evaluate(() => document.body.innerText)
+          await apiPage.close()
+          
+          const apiResponse = JSON.parse(bodyText)
+          if (apiResponse && apiResponse.media_extended) {
+            mediaUrls = apiResponse.media_extended.map((m: any) => m.url)
+          }
+        } catch (apiErr) {
+          ctx.logger('twitter-ultimate').warn('在浏览器内请求 vxtwitter API 失败:', apiErr)
+        }
+      }
 
       return {
         text: textContent,
