@@ -1,4 +1,4 @@
-import { Context, Schema, h } from 'koishi'
+import { Context, Schema, h, Session } from 'koishi'
 import type { ChatLunaChatModel } from 'koishi-plugin-chatluna/lib/llm-core/platform/model'
 import type { ComputedRef } from 'koishi-plugin-chatluna'
 
@@ -66,8 +66,7 @@ export function apply(ctx: Context, config: Config) {
         const tweetId = match[1]
         try {
           await session.send('🔍 正在解析推文并生成截图...')
-          const result = await processTweet(ctx, config, tweetId, chatLunaModel)
-          await session.send(result)
+          await processTweet(session, ctx, config, tweetId, chatLunaModel)
         } catch (e) {
           ctx.logger('twitter-ultimate').error(e)
           await session.send(`解析推文失败: ${e instanceof Error ? e.message : String(e)}`)
@@ -88,7 +87,8 @@ export function apply(ctx: Context, config: Config) {
       
       try {
         await session.send('🔍 正在解析推文并生成截图...')
-        return await processTweet(ctx, config, match[1], chatLunaModel)
+        await processTweet(session, ctx, config, match[1], chatLunaModel)
+        return
       } catch (e) {
         ctx.logger('twitter-ultimate').error(e)
         return `解析推文失败: ${e instanceof Error ? e.message : String(e)}`
@@ -96,8 +96,8 @@ export function apply(ctx: Context, config: Config) {
     })
 }
 
-// 核心链路：抓取 -> 翻译 -> 截图渲染 -> 返回消息元素
-async function processTweet(ctx: Context, config: Config, tweetId: string, chatLunaModel?: ComputedRef<ChatLunaChatModel>) {
+// 核心链路：抓取 -> 翻译 -> 截图渲染 -> 发送消息
+async function processTweet(session: Session, ctx: Context, config: Config, tweetId: string, chatLunaModel?: ComputedRef<ChatLunaChatModel>) {
   const tweetUrl = `https://x.com/x/status/${tweetId}`
   let tweetText = ''
   let translatedText = ''
@@ -208,21 +208,19 @@ async function processTweet(ctx: Context, config: Config, tweetId: string, chatL
     throw new Error('未能生成推文截图')
   }
 
-  // 4. 组装返回结果
-  const resultElements = [h.image(screenshotBuf, 'image/png')]
+  // 4. 发送结果：图片与视频分开发送，解决部分平台不支持单条消息包含图文和视频的问题
+  await session.send(h.image(screenshotBuf, 'image/png'))
 
   // 如果是用真实的推特页面截图，翻译文本无法画在图里，所以我们额外追加一段文字消息发送
   if (!isApiSuccess && translatedText) {
-    resultElements.push(h.text(`\n📝 AI 翻译:\n${translatedText}\n`))
+    await session.send(`📝 AI 翻译:\n${translatedText}`)
   }
 
   // 发送视频
   const videos = mediaUrls.filter((url) => url.includes('.mp4') || url.includes('video.twimg.com'))
   for (const v of videos) {
-    resultElements.push(h.video(v))
+    await session.send(h.video(v))
   }
-
-  return resultElements
 }
 
 // 模拟 xanalyse 浏览器登录截图与内容提取
