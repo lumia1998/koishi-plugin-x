@@ -20,7 +20,7 @@ export interface Config {
   cookies?: string
 }
 
-const DEFAULT_PROMPT = '你是精通多国语言与互联网文化的推文翻译专家。请将输入的内容准确、通顺地翻译为简体中文，仅输出译文，不要附加解释。可根据语境适度润色以符合中文阅读习惯，但需保留原文格式（换行、段落、标点）并保留推文的原始含义与语气。保留网址、emoji、#话题标签原样，不翻译人名或其代称。若内容为空、仅含链接、仅占位符或无有效文本，请不要翻译并直接输出空内容。请翻译：{text}'
+const DEFAULT_PROMPT = '你是精通多国与互联网文化的推文翻译专家。请将输入内容翻译为简体中文，仅输出译文，不要附加解释。可适度润色，但需保留原文格式（换行、段落、标点）。保留网址、emoji、#话题标签原样，不翻译人名或其代称。正确理解常见缩写与梗语。若内容为空、仅含链接、仅占位符或无有效文本，请不要翻译并直接输出空内容。请翻译：{text}'
 
 export const Config: Schema<Config> = Schema.object({
   detectXLinks: Schema.boolean().default(true).description('是否自动解析聊天中的 x.com / twitter.com 链接'),
