@@ -17,7 +17,7 @@ export interface Config {
   enableTranslation: boolean
   model: string
   translationPrompt: string
-  cookies: string
+  cookies?: string
 }
 
 const DEFAULT_PROMPT = '你是精通多国与互联网文化的推文翻译专家。请将输入内容翻译为简体中文，仅输出译文，不要附加解释。可适度润色，但需保留原文格式（换行、段落、标点）。保留网址、emoji、#话题标签原样，不翻译人名或其代称。正确理解常见缩写与梗语。若内容为空、仅含链接、仅占位符或无有效文本，请不要翻译并直接输出空内容。请翻译：{text}'
@@ -27,7 +27,7 @@ export const Config: Schema<Config> = Schema.object({
   enableTranslation: Schema.boolean().default(true).description('是否使用 ChatLuna 翻译推文内容'),
   model: Schema.dynamic('model').description('使用的大语言模型名称 (需要通过 ChatLuna 先配置并启用)'),
   translationPrompt: Schema.string().role('textarea').default(DEFAULT_PROMPT).description('传递给 ChatLuna 的翻译提示词，可以使用 {text} 作为推文占位符'),
-  cookies: Schema.string().required().role('secret').description('Twitter/X 登录 Cookie (auth_token)，用于浏览器登录并解析截图')
+  cookies: Schema.string().role('secret').description('Twitter/X 登录 Cookie (auth_token)，用于 API 解析失败时通过浏览器截图进行兜底')
 }).description('基础设置')
 
 export function apply(ctx: Context, config: Config) {
@@ -99,24 +99,109 @@ export function apply(ctx: Context, config: Config) {
 // 核心链路：抓取 -> 翻译 -> 截图渲染 -> 发送消息
 async function processTweet(session: Session, ctx: Context, config: Config, tweetId: string, chatLunaModel?: ComputedRef<ChatLunaChatModel>, originalUrl?: string) {
   const tweetUrl = originalUrl || `https://x.com/i/status/${tweetId}`
-  
-  if (!config.cookies) {
-    throw new Error('未配置 Twitter/X 登录 Cookie (auth_token)，请在插件设置中填入 Cookie。')
-  }
-  
-  ctx.logger('twitter-ultimate').info('启动浏览器进行推特页面截图与内容抓取...')
-  const scraped = await scrapeTweetWithCookie(ctx, tweetUrl, config.cookies)
-  const tweetText = scraped.text
-  const screenshotBuf = scraped.screenshot
-  const mediaUrls = scraped.mediaUrls
-
+  let tweetText = ''
   let translatedText = ''
-  if (config.enableTranslation && tweetText) {
-    if (chatLunaModel && chatLunaModel.value) {
-      try {
-        translatedText = await translate(tweetText, ctx, config, chatLunaModel)
-      } catch (e) {
-        ctx.logger('twitter-ultimate').warn('翻译失败: ' + e)
+  let screenshotBuf: Buffer | null = null
+  let mediaUrls: string[] = []
+  let isApiSuccess = false
+
+  // 1. 尝试使用 API 模式 (vxtwitter)
+  try {
+    const response = await ctx.http.get(`https://api.vxtwitter.com/i/status/${tweetId}`)
+    
+    if (response && response.tweet) {
+      const tweet = response.tweet
+      tweetText = tweet.text || ''
+      mediaUrls = (tweet.media?.all || []).map((m: any) => m.url)
+      
+      // 本地 HTML 渲染截图 (API模式下不需要登录，只绘制图片)
+      const avatarUrl = tweet.author?.avatar_url || ''
+      const authorName = tweet.author?.name || 'Unknown'
+      const screenName = tweet.author?.screen_name || 'unknown'
+      
+      // AI 翻译
+      if (config.enableTranslation && tweetText) {
+        if (chatLunaModel && chatLunaModel.value) {
+          try {
+            translatedText = await translate(tweetText, ctx, config, chatLunaModel)
+          } catch (e) {
+            ctx.logger('twitter-ultimate').warn('翻译失败: ' + e)
+          }
+        }
+      }
+
+      // 本地渲染时排除视频文件，仅绘制图片
+      const mediaElements = mediaUrls
+        .filter((url: string) => !url.includes('.mp4') && !url.includes('video.twimg.com'))
+        .map((url: string) => `<img src="${url}" style="max-width: 100%; border-radius: 12px; margin-top: 8px;">`)
+        .join('')
+
+      const html = `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta charset="utf-8">
+          <style>
+            body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f0f3f5; padding: 20px; display: flex; justify-content: center; }
+            .card { background: white; border-radius: 16px; padding: 24px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); max-width: 500px; width: 100%; }
+            .header { display: flex; align-items: center; margin-bottom: 16px; }
+            .avatar { width: 48px; height: 48px; border-radius: 50%; margin-right: 12px; }
+            .names { display: flex; flex-direction: column; }
+            .name { font-weight: bold; font-size: 16px; color: #0f1419; }
+            .handle { color: #536471; font-size: 14px; }
+            .content { font-size: 16px; color: #0f1419; white-space: pre-wrap; line-height: 1.5; margin-bottom: 12px; }
+            .media { display: flex; flex-direction: column; gap: 8px; }
+            .footer { margin-top: 16px; color: #536471; font-size: 14px; }
+          </style>
+        </head>
+        <body>
+          <div class="card" id="tweet-card">
+            <div class="header">
+              <img class="avatar" src="${avatarUrl}" />
+              <div class="names">
+                <span class="name">${authorName}</span>
+                <span class="handle">@${screenName}</span>
+              </div>
+            </div>
+            <div class="content">${tweetText}</div>
+            <div class="media">
+              ${mediaElements}
+            </div>
+            <div class="footer">Koishi Twitter Ultimate (API Mode)</div>
+          </div>
+        </body>
+        </html>
+      `
+
+      screenshotBuf = await ctx.puppeteer.render(html, {
+        waitUntil: 'networkidle0'
+      })
+      isApiSuccess = true
+    }
+  } catch (e) {
+    ctx.logger('twitter-ultimate').warn(`API 模式解析失败，将尝试使用 Cookie 浏览器截图进行兜底。错误原因: ${e instanceof Error ? e.message : String(e)}`)
+  }
+
+  // 3. API 失败时，使用 Cookie 浏览器截图进行兜底 (xanalyse 方式)
+  if (!isApiSuccess) {
+    if (!config.cookies) {
+      throw new Error('API 解析失败，且未配置用于浏览器兜底的 Cookie (auth_token)，请在插件设置中填入 Cookie。')
+    }
+    
+    ctx.logger('twitter-ultimate').info('启动浏览器进行推特页面截图与内容抓取...')
+    const scraped = await scrapeTweetWithCookie(ctx, tweetUrl, config.cookies)
+    tweetText = scraped.text
+    screenshotBuf = scraped.screenshot
+    mediaUrls = scraped.mediaUrls
+
+    // 再次翻译
+    if (config.enableTranslation && tweetText) {
+      if (chatLunaModel && chatLunaModel.value) {
+        try {
+          translatedText = await translate(tweetText, ctx, config, chatLunaModel)
+        } catch (e) {
+          ctx.logger('twitter-ultimate').warn('翻译失败: ' + e)
+        }
       }
     }
   }
@@ -125,22 +210,23 @@ async function processTweet(session: Session, ctx: Context, config: Config, twee
     throw new Error('未能生成推文截图')
   }
 
-  // 4. 发送结果：图片与视频分开发送
+  // 4. 分开三条消息发送（截图 -> 内容翻译 -> 视频）
+  // 消息 1: 截图
   await session.send(h.image(screenshotBuf, 'image/png'))
 
-  // 发送翻译
+  // 消息 2: 内容翻译
   if (translatedText) {
     await session.send(`📝 AI 翻译:\n${translatedText}`)
   }
 
-  // 发送视频 (只发送主推文内的视频)
+  // 消息 3: 视频
   const videos = mediaUrls.filter((url: string) => url.includes('.mp4') || url.includes('video.twimg.com'))
   for (const v of videos) {
     await session.send(h.video(v))
   }
 }
 
-// 模拟 xanalyse 浏览器登录截图与内容提取 (加入重试机制 + vxtwitter API 获取媒体)
+// 模拟 xanalyse 浏览器登录截图与内容提取 (加入重试与 Cookie 失效检测)
 async function scrapeTweetWithCookie(ctx: Context, url: string, cookies: string, maxRetries = 3) {
   let attempts = 0
   let page: any
@@ -160,6 +246,18 @@ async function scrapeTweetWithCookie(ctx: Context, url: string, cookies: string,
       await page.setDefaultTimeout(60000)
       await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 })
       
+      // 检测 Cookie 是否过期/失效
+      const currentUrl = page.url()
+      const hasLoginButton = await page.evaluate(() => {
+        return !!(document.querySelector('div[data-testid="loginButton"]') || 
+                  document.querySelector('a[href*="/login"]') ||
+                  document.querySelector('div[data-testid="signupButton"]'))
+      })
+      
+      if (currentUrl.includes('/i/flow/login') || currentUrl.includes('/login') || hasLoginButton) {
+        throw new Error('Cookie已失效，已过期，请重新获取并在插件设置中配置！')
+      }
+
       // 等待推文容器渲染
       await page.waitForSelector('article', { timeout: 30000 })
       
@@ -181,12 +279,7 @@ async function scrapeTweetWithCookie(ctx: Context, url: string, cookies: string,
         throw new Error('未能找到推文容器')
       }
 
-      // 检查是否为受保护账号
-      const isProtected = await page.evaluate(() => {
-        return !!document.querySelector('[aria-label="受保护账号"]')
-      })
-
-      // 获取正文
+      // 获取正文 (仅从主推文中获取，避免主推文无文字时误抓下方回复的文字)
       const textContent = await element.evaluate((el: any) => {
         const textEl = el.querySelector('div[data-testid="tweetText"]')
         return textEl ? textEl.textContent || '' : ''
@@ -233,23 +326,21 @@ async function scrapeTweetWithCookie(ctx: Context, url: string, cookies: string,
         screenshotBuffer = await element.screenshot({ type: "webp" })
       }
 
-      // 获取媒体列表：如果是受保护账号，不获取视频。否则调用 vxtwitter API。
-      let mediaUrls: string[] = []
-      if (!isProtected) {
-        const apiUrl = url.replace(/(twitter\.com|x\.com)/, 'api.vxtwitter.com')
-        try {
-          const apiResponse = await ctx.http.get(apiUrl, {
-            headers: {
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-            }
-          })
-          if (apiResponse && apiResponse.media_extended) {
-            mediaUrls = apiResponse.media_extended.map((m: any) => m.url)
-          }
-        } catch (apiErr) {
-          ctx.logger('twitter-ultimate').warn('请求 vxtwitter API 提取媒体直链失败:', apiErr)
-        }
-      }
+      // 从 DOM 提取仅属于该推文的媒体资源链接 (避免抓取到下方回复中的表情包/视频)
+      const mediaUrls = await element.evaluate((el: any) => {
+        const urls: string[] = []
+        const images = el.querySelectorAll('img[src*="pbs.twimg.com/media/"]')
+        images.forEach((img: any) => {
+          const src = img.getAttribute('src')
+          if (src) urls.push(src)
+        })
+        const videos = el.querySelectorAll('video')
+        videos.forEach((v: any) => {
+          const src = v.getAttribute('src')
+          if (src) urls.push(src)
+        })
+        return urls
+      })
 
       return {
         text: textContent,
@@ -257,6 +348,12 @@ async function scrapeTweetWithCookie(ctx: Context, url: string, cookies: string,
         mediaUrls: mediaUrls
       }
     } catch (e) {
+      // 如果检测到 Cookie 过期错误，不要进行无意义的重试，直接抛出异常给用户
+      if (e instanceof Error && e.message.includes('Cookie已失效')) {
+        if (page) await page.close().catch(() => {})
+        throw e
+      }
+      
       attempts++
       ctx.logger('twitter-ultimate').warn(`浏览器截图第 ${attempts} 次尝试失败: ${e instanceof Error ? e.message : String(e)}`)
       if (page) await page.close().catch(() => {})
