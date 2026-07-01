@@ -1,0 +1,28 @@
+{
+  "name": "koishi-plugin-x",
+  "version": "1.0.0",
+  "description": "Combine the pros of twitter-fetcher and xanalyse, with ChatLuna translation",
+  "main": "lib/index.js",
+  "typings": "lib/index.d.ts",
+  "files": [
+    "lib",
+    "package.json"
+  ],
+  "scripts": {
+    "build": "tsc"
+  },
+  "dependencies": {
+    "koishi": "^4.17.0"
+  },
+  "peerDependencies": {
+    "koishi": "^4.17.0",
+    "koishi-plugin-puppeteer": "^3.0.0"
+  },
+  "koishi": {
+    "description": "推特X终极插件：精美截图 + ChatLuna大模型翻译",
+    "service": {
+      "required": ["puppeteer"],
+      "optional": ["chatluna"]
+    }
+  }
+}
