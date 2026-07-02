@@ -155,8 +155,8 @@ async function processTweet(session: Session, ctx: Context, config: Config, twee
           return mediaUrl
         }).filter(Boolean)
         
-        avatarUrl = tweet.author?.avatar_url || tweet.user?.avatar_url || ''
-        authorName = tweet.author?.name || tweet.user?.name || 'Unknown'
+        avatarUrl = tweet.author?.avatar_url || tweet.user?.avatar_url || tweet.user_profile_image_url || ''
+        authorName = tweet.author?.name || tweet.user?.name || tweet.user_name || 'Unknown'
         screenName = extractedScreenName
         isApiSuccess = true
         modeLabel = `API Mode - ${provider}`
@@ -198,7 +198,7 @@ async function processTweet(session: Session, ctx: Context, config: Config, twee
   // 4. 本地 HTML 渲染截图 (统一在本地合成卡片并渲染截图)
   // 本地渲染时排除视频文件，仅绘制图片
   const mediaElements = mediaUrls
-    .filter((url: string) => !url.includes('.mp4') && !url.includes('video.twimg.com'))
+    .filter((url: string) => !isVideoUrl(url))
     .map((url: string) => `<img src="${url}" style="max-width: 100%; border-radius: 12px; margin-top: 8px;">`)
     .join('')
 
@@ -257,7 +257,7 @@ async function processTweet(session: Session, ctx: Context, config: Config, twee
   }
 
   // 消息 3: 视频
-  const videos = mediaUrls.filter((url: string) => url.includes('.mp4') || url.includes('video.twimg.com'))
+  const videos = mediaUrls.filter((url: string) => isVideoUrl(url))
   for (const v of videos) {
     await session.send(h.video(v))
   }
@@ -552,4 +552,9 @@ function sanitizeMediaUrl(url: string) {
     .replace(/\\u002F/g, '/')
     .replace(/\\\//g, '/')
     .replace(/[),.;\]]+$/g, '')
+}
+
+function isVideoUrl(url: string): boolean {
+  const lower = url.toLowerCase()
+  return lower.includes('video.twimg.com') || lower.includes('.mp4') || lower.includes('.m3u8') || lower.includes('tweet_video')
 }
