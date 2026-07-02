@@ -13,6 +13,9 @@ export interface Config {
     model: string;
     translationPrompt: string;
     cookies?: string;
+    apiProvider?: 'vxtwitter' | 'fxtwitter';
+    downloadOriginalImage?: boolean;
+    logDetails?: boolean;
 }
 export declare const Config: Schema<Config>;
 export declare function apply(ctx: Context, config: Config): void;

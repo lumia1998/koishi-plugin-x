@@ -1,6 +1,6 @@
 {
   "name": "koishi-plugin-x",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "description": "在群聊解析Twitter链接",
   "author": "lumia1998",
   "homepage": "https://github.com/lumia1998/koishi-plugin-x",
@@ -21,9 +21,10 @@
     "koishi": "^4.17.0"
   },
   "devDependencies": {
-    "typescript": "^5.6.2",
+    "@langchain/core": "^0.2.0",
     "koishi-plugin-chatluna": "^1.4.0-alpha.33",
-    "@langchain/core": "^0.2.0"
+    "puppeteer-core": "^25.3.0",
+    "typescript": "^5.6.2"
   },
   "peerDependencies": {
     "koishi": "^4.17.0"
