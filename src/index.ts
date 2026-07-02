@@ -239,8 +239,20 @@ async function processTweet(session: Session, ctx: Context, config: Config, twee
     </html>
   `
 
-  screenshotBuf = await ctx.puppeteer.render(html, {
-    waitUntil: 'networkidle0'
+  screenshotBuf = await ctx.puppeteer.render(html, async (page: any) => {
+    await page.evaluate(async () => {
+      const imgs = Array.from(document.querySelectorAll('img'))
+      await Promise.all(imgs.map(img => {
+        if (img.complete) return
+        return new Promise((resolve) => {
+          img.onload = resolve
+          img.onerror = resolve
+        })
+      }))
+    })
+    const body = await page.$('body')
+    const clip = body ? await body.boundingBox() : null
+    return page.screenshot({ clip })
   })
 
   if (!screenshotBuf) {

@@ -1,6 +1,6 @@
 {
   "name": "koishi-plugin-x",
-  "version": "0.0.9",
+  "version": "0.0.10",
   "description": "在群聊解析Twitter链接",
   "author": "lumia1998",
   "homepage": "https://github.com/lumia1998/koishi-plugin-x",
