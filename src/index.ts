@@ -266,6 +266,9 @@ async function scrapeTweetWithCookie(ctx: Context, url: string, cookies: string,
       // 等待推文容器渲染
       await page.waitForSelector('article', { timeout: 30000 })
       
+      // 等待 2.5 秒，给 React 渲染多媒体图片及网络请求加载以充足的时间
+      await new Promise(resolve => setTimeout(resolve, 2500))
+
       // 等待图片加载
       await page.evaluate(async () => {
         const article = document.querySelector('article[data-testid="tweet"]') || document.querySelector('article')

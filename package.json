@@ -1,7 +1,7 @@
 {
   "name": "koishi-plugin-x",
   "version": "0.0.5",
-  "description": "结合 twitter-fetcher 与 xanalyse 优点，支持 ChatLuna 大模型翻译与浏览器兜底截图的推特解析插件",
+  "description": "支持 ChatLuna 大语言模型智能翻译与浏览器兜底截图的 Twitter/X 推文解析插件",
   "author": "lumia1998",
   "homepage": "https://github.com/lumia1998/koishi-plugin-x",
   "repository": {
