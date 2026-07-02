@@ -269,6 +269,18 @@ async function scrapeTweetWithCookie(ctx: Context, url: string, cookies: string,
       // 等待 2.5 秒，给 React 渲染多媒体图片及网络请求加载以充足的时间
       await new Promise(resolve => setTimeout(resolve, 2500))
 
+      // 等待可能存在的多媒体图片/视频加载指示器（progressbar）消失
+      try {
+        await page.waitForFunction(() => {
+          const article = document.querySelector('article[data-testid="tweet"]') || document.querySelector('article')
+          if (!article) return true
+          const progressbar = article.querySelector('[role="progressbar"]')
+          return !progressbar
+        }, { timeout: 15000 })
+      } catch (err) {
+        ctx.logger('twitter-ultimate').warn('等待推文加载指示器消失超时，将继续进行后续处理')
+      }
+
       // 等待图片加载
       await page.evaluate(async () => {
         const article = document.querySelector('article[data-testid="tweet"]') || document.querySelector('article')
@@ -301,6 +313,18 @@ async function scrapeTweetWithCookie(ctx: Context, url: string, cookies: string,
       // 截图逻辑 (直接从页面裁切)
       let screenshotBuffer: Buffer
       try {
+        try {
+          // wait up to 15s for imgs inside the article to finish loading
+          await page.waitForFunction((sel: string) => {
+            const a = document.querySelector(sel)
+            if (!a) return false
+            const imgs = Array.from(a.querySelectorAll('img')) as HTMLImageElement[]
+            return imgs.every((img) => img.complete && img.naturalWidth > 0)
+          }, { timeout: 15000 }, 'article[data-testid="tweet"]')
+        } catch (__) {
+          // proceed even if timeout — we'll still try to capture
+        }
+
         const box = await element.boundingBox()
         if (box) {
           const imgs = await element.$$('img')
