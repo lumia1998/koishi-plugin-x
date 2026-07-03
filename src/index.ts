@@ -72,11 +72,20 @@ function safeImageSrc(value: string) {
   return ''
 }
 
+interface MediaPreview {
+  url: string
+  width?: number
+  height?: number
+}
+
 // 生成 Twitter 样式的 HTML 卡片
-function generateTweetHTML(authorName: string, screenName: string, avatarUrl: string, tweetText: string, mediaPreviewUrls: string[]) {
-  const mediaHTML = mediaPreviewUrls.length > 0
-    ? `<div class="media-grid ${mediaPreviewUrls.length === 1 ? 'single' : mediaPreviewUrls.length === 2 ? 'double' : 'multiple'}">
-        ${mediaPreviewUrls.map(url => `<img src="${escapeHtml(safeImageSrc(url))}" class="media-img" />`).join('')}
+function generateTweetHTML(authorName: string, screenName: string, avatarUrl: string, tweetText: string, mediaPreviews: MediaPreview[]) {
+  const mediaHTML = mediaPreviews.length > 0
+    ? `<div class="media-grid ${mediaPreviews.length === 1 ? 'single' : mediaPreviews.length === 2 ? 'double' : 'multiple'}">
+        ${mediaPreviews.map((media) => {
+          const aspect = media.width && media.height ? ` style="aspect-ratio: ${media.width} / ${media.height};"` : ''
+          return `<img src="${escapeHtml(safeImageSrc(media.url))}" class="media-img"${aspect} />`
+        }).join('')}
        </div>`
     : ''
 
@@ -92,6 +101,7 @@ function generateTweetHTML(authorName: string, screenName: string, avatarUrl: st
       background: #ffffff;
       padding: 20px;
       width: 600px;
+      display: inline-block;
     }
     .tweet-card {
       background: white;
@@ -151,9 +161,13 @@ function generateTweetHTML(authorName: string, screenName: string, avatarUrl: st
     .media-img {
       width: 100%;
       height: auto;
-      max-height: 400px;
-      object-fit: cover;
+      object-fit: contain;
       display: block;
+    }
+    .media-grid:not(.single) .media-img {
+      aspect-ratio: 1 / 1;
+      height: 100%;
+      object-fit: cover;
     }
   </style>
 </head>
@@ -263,7 +277,7 @@ export async function apply(ctx: Context, config: Config) {
       const imageUrls = tpTweet.imageUrls || []
       const videoUrls = tpTweet.videoUrls || []
       if (config.outputLogs) logger.info(`媒体数量: 图片${imageUrls.length}, 视频${videoUrls.length}`)
-      const mediaPreviewUrls: string[] = []
+      const mediaPreviews: MediaPreview[] = []
 
       for (const imgUrl of imageUrls.slice(0, 4)) {
         try {
@@ -271,7 +285,7 @@ export async function apply(ctx: Context, config: Config) {
             responseType: 'arraybuffer',
             headers: { 'User-Agent': 'Mozilla/5.0' }
           })
-          mediaPreviewUrls.push(`data:image/jpeg;base64,${Buffer.from(imgData).toString('base64')}`)
+          mediaPreviews.push({ url: `data:image/jpeg;base64,${Buffer.from(imgData).toString('base64')}` })
         } catch (err) {
           if (config.outputLogs) logger.warn('下载图片预览失败:', err)
         }
@@ -285,7 +299,12 @@ export async function apply(ctx: Context, config: Config) {
             responseType: 'arraybuffer',
             headers: { 'User-Agent': 'Mozilla/5.0' }
           })
-          mediaPreviewUrls.push(`data:image/jpeg;base64,${Buffer.from(thumbData).toString('base64')}`)
+          const dimensions = tpTweet.mediaDimensions?.[videoUrl]
+          mediaPreviews.push({
+            url: `data:image/jpeg;base64,${Buffer.from(thumbData).toString('base64')}`,
+            width: dimensions?.width,
+            height: dimensions?.height,
+          })
         } catch (err) {
           if (config.outputLogs) logger.warn('下载视频缩略图失败:', err)
         }
@@ -304,7 +323,7 @@ export async function apply(ctx: Context, config: Config) {
         tpTweet.screenName,
         avatarDataUrl,
         tweetWord,
-        mediaPreviewUrls
+        mediaPreviews
       )
 
       if (config.outputLogs) logger.info('开始渲染 HTML 为图片')
@@ -312,8 +331,11 @@ export async function apply(ctx: Context, config: Config) {
       let cardBuffer
       try {
         await page.setContent(html, { waitUntil: 'networkidle0' })
-        await page.setViewport({ width: 600, height: 800 })
-        cardBuffer = await page.screenshot({ type: 'png', fullPage: true })
+        await page.setViewport({ width: 640, height: 1200 })
+        const cardElement = await page.$('.tweet-card')
+        cardBuffer = cardElement
+          ? await cardElement.screenshot({ type: 'png' })
+          : await page.screenshot({ type: 'png', fullPage: true })
         if (config.outputLogs) logger.info('HTML 卡片渲染成功')
       } finally {
         await page.close()
@@ -536,6 +558,7 @@ async function getTimePushedTweet(ctx, pptr, url, config, maxRetries?: number) {
         let videoUrls: string[] = [] // 单独保存视频URL
         let imageUrls: string[] = [] // 单独保存图片URL
         let videoThumbnails: { [url: string]: string } = {} // 视频URL -> 缩略图URL
+        let mediaDimensions: { [url: string]: { width?: number; height?: number } } = {}
 
         // 提取媒体和 alt 文本
         if (tweet.media && tweet.media.all && Array.isArray(tweet.media.all) && tweet.media.all.length > 0) {
@@ -546,11 +569,13 @@ async function getTimePushedTweet(ctx, pptr, url, config, maxRetries?: number) {
               // 按类型分类
               if (media.type === 'video') {
                 videoUrls.push(media.url)
+                mediaDimensions[media.url] = { width: media.width, height: media.height }
                 if (media.thumbnail_url) {
                   videoThumbnails[media.url] = media.thumbnail_url
                 }
               } else if (media.type === 'photo') {
                 imageUrls.push(media.url)
+                mediaDimensions[media.url] = { width: media.width, height: media.height }
               }
             }
           }
@@ -589,6 +614,7 @@ async function getTimePushedTweet(ctx, pptr, url, config, maxRetries?: number) {
           authorName: authorName,
           screenName: screenName,
           videoThumbnails: videoThumbnails, // 视频缩略图映射
+          mediaDimensions: mediaDimensions,
           fromAPI: true // 标记来自 API
         }
       } else {
