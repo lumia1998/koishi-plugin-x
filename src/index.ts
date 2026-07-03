@@ -8,7 +8,7 @@ export const logger = new Logger('x')
 
 export const inject = { required: ['puppeteer'], optional: ['chatluna'] }
 
-const DEFAULT_PROMPT = '你是精通多国与互联网文化的推文翻译专家。请将输入内容翻译为简体中文，仅输出译文，不要附加解释。可适度润色，但需保留原文格式（换行、段落、标点）。保留网址、emoji、所有 #hashtag/#话题标签原样，不要翻译、解释、改写或增删任何 hashtag。不翻译人名或其代称。正确理解互联网常见缩写与梗语。若内容为空、仅含链接、仅含 hashtag、仅占位符或无有效文本，请不要翻译并直接输出空内容。请翻译：{text}'
+const DEFAULT_PROMPT = '你是精通多国与互联网文化的推文翻译专家。请将输入内容翻译为简体中文，仅输出译文，不要附加解释。可适度润色，但需保留原文格式（换行、段落、标点）。保留网址、emoji 原样。不翻译人名或其代称。正确理解互联网常见缩写与梗语。不要输出任何 hashtag/#话题标签。若内容为空、仅含链接、仅含 hashtag、仅占位符或无有效文本，请不要翻译并直接输出空内容。请翻译：{text}'
 
 export interface Config {
   cookies: string
@@ -60,25 +60,12 @@ interface ProcessedTweetMessage {
   parts: (h | string)[]
 }
 
-function protectHashtags(text: string) {
-  const hashtags: string[] = []
-  const protectedText = text.replace(/#[\p{L}\p{N}_]+/gu, (tag) => {
-    const index = hashtags.push(tag) - 1
-    return `__KOISHI_X_HASHTAG_${index}__`
-  })
-  return { protectedText, hashtags }
-}
-
-function restoreHashtags(text: string, hashtags: string[]) {
-  let restored = text
-  hashtags.forEach((tag, index) => {
-    restored = restored.replace(new RegExp(`__KOISHI_X_HASHTAG_${index}__`, 'g'), tag)
-  })
-  const missing = hashtags.filter((tag) => !restored.includes(tag))
-  if (missing.length) {
-    restored = `${restored.trimEnd()}\n${missing.join(' ')}`
-  }
-  return restored
+function removeHashtags(text: string) {
+  return text
+    .replace(/#[\p{L}\p{N}_]+/gu, '')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
 }
 
 async function getTweetScreenshot(puppeteer, url: string, cookie?: string, outputLogs?: boolean): Promise<Buffer> {
@@ -671,10 +658,11 @@ async function getTimePushedTweet(ctx, pptr, url, config, maxRetries?: number) {
 async function translate(text: string, ctx, config, chatLunaModel?: ComputedRef<ChatLunaChatModel>) {
   const { HumanMessage } = await import('@langchain/core/messages')
   const promptTemplate = (config.prompt && config.prompt.trim()) ? config.prompt : DEFAULT_PROMPT
-  const { protectedText, hashtags } = protectHashtags(text)
+  const textWithoutHashtags = removeHashtags(text)
+  if (!textWithoutHashtags) return ''
   const prompt = [
-    '翻译时必须原样保留形如 __KOISHI_X_HASHTAG_0__ 的占位符，不要解释、改写、删除或移动它们。',
-    promptTemplate.replace('{text}', protectedText)
+    '输入中的 hashtag/#话题标签已经被移除。输出中也不要添加任何 hashtag/#话题标签。',
+    promptTemplate.replace('{text}', textWithoutHashtags)
   ].join('\n')
   const retryLimit = Math.max(1, config.translateRetries ?? 3)
   let attempts = 0
@@ -693,7 +681,7 @@ async function translate(text: string, ctx, config, chatLunaModel?: ComputedRef<
         const translation = typeof response.content === 'string'
           ? response.content
           : JSON.stringify(response.content)
-        return restoreHashtags(translation, hashtags)
+        return removeHashtags(translation)
       } else {
         throw new Error('模型未返回任何内容')
       }
