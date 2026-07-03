@@ -1,13 +1,18 @@
 {
   "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "lib",
     "target": "es2022",
     "module": "commonjs",
-    "moduleResolution": "node",
     "declaration": true,
-    "strict": true,
-    "outDir": "lib",
+    "skipLibCheck": true,
     "esModuleInterop": true,
-    "skipLibCheck": true
+    "moduleResolution": "node",
+    "jsx": "react-jsx",
+    "jsxImportSource": "@satorijs/element",
+    "types": [
+      "node"
+    ]
   },
   "include": [
     "src"

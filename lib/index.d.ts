@@ -1,21 +1,26 @@
-import { Context, Schema } from 'koishi';
+import { Context, Schema, Logger } from 'koishi';
 export declare const name = "x";
-export declare const inject: string[];
-declare module 'koishi' {
-    interface Context {
-        puppeteer: any;
-        chatluna: any;
-    }
-}
+export declare const logger: Logger;
+export declare const inject: {
+    required: string[];
+    optional: string[];
+};
 export interface Config {
-    detectXLinks: boolean;
-    enableTranslation: boolean;
-    model: string;
-    translationPrompt: string;
-    cookies?: string;
-    apiProvider?: 'vxtwitter' | 'fxtwitter';
-    downloadOriginalImage?: boolean;
-    logDetails?: boolean;
+    cookies: string;
+    fetchRetries: number;
+    whe_translate?: boolean;
+    model?: string;
+    prompt?: string;
+    translateRetries?: number;
+    outputLogs?: boolean;
+    detectXLinks?: boolean;
+    useForward?: boolean;
 }
 export declare const Config: Schema<Config>;
-export declare function apply(ctx: Context, config: Config): void;
+declare module 'koishi' {
+    interface Context {
+        chatluna: any;
+        puppeteer: any;
+    }
+}
+export declare function apply(ctx: Context, config: Config): Promise<void>;
