@@ -56,140 +56,32 @@ declare module 'koishi' {
   }
 }
 
-function escapeHtml(value: unknown) {
-  return String(value ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;')
-}
-
-function safeImageSrc(value: string) {
-  const url = String(value || '').trim()
-  if (/^data:image\/(?:png|jpe?g|webp|gif);base64,[a-z0-9+/=]+$/i.test(url)) return url
-  if (/^https?:\/\//i.test(url)) return url
-  return ''
-}
-
-interface MediaPreview {
-  url: string
-  width?: number
-  height?: number
-}
-
-// 生成 Twitter 样式的 HTML 卡片
-function generateTweetHTML(authorName: string, screenName: string, avatarUrl: string, tweetText: string, mediaPreviews: MediaPreview[]) {
-  const mediaHTML = mediaPreviews.length > 0
-    ? `<div class="media-grid ${mediaPreviews.length === 1 ? 'single' : mediaPreviews.length === 2 ? 'double' : 'multiple'}">
-        ${mediaPreviews.map((media) => {
-          const aspect = media.width && media.height ? ` style="aspect-ratio: ${media.width} / ${media.height};"` : ''
-          return `<img src="${escapeHtml(safeImageSrc(media.url))}" class="media-img"${aspect} />`
-        }).join('')}
-       </div>`
-    : ''
-
-  return `
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      background: #ffffff;
-      padding: 20px;
-      width: 600px;
-      display: inline-block;
-    }
-    .tweet-card {
-      background: white;
-      border: 1px solid #e1e8ed;
-      border-radius: 16px;
-      padding: 16px;
-    }
-    .header {
-      display: flex;
-      align-items: center;
-      margin-bottom: 12px;
-    }
-    .avatar {
-      width: 48px;
-      height: 48px;
-      border-radius: 50%;
-      margin-right: 12px;
-    }
-    .user-info {
-      flex: 1;
-    }
-    .display-name {
-      font-size: 15px;
-      font-weight: 700;
-      color: #0f1419;
-      line-height: 20px;
-    }
-    .username {
-      font-size: 15px;
-      color: #536471;
-      line-height: 20px;
-    }
-    .tweet-text {
-      font-size: 15px;
-      line-height: 20px;
-      color: #0f1419;
-      white-space: pre-wrap;
-      word-wrap: break-word;
-      margin-bottom: 12px;
-    }
-    .media-grid {
-      border-radius: 16px;
-      overflow: hidden;
-      display: grid;
-      gap: 2px;
-      max-width: 100%;
-    }
-    .media-grid.single {
-      grid-template-columns: 1fr;
-    }
-    .media-grid.double {
-      grid-template-columns: 1fr 1fr;
-    }
-    .media-grid.multiple {
-      grid-template-columns: 1fr 1fr;
-    }
-    .media-img {
-      width: 100%;
-      height: auto;
-      object-fit: contain;
-      display: block;
-    }
-    .media-grid:not(.single) .media-img {
-      aspect-ratio: 1 / 1;
-      height: 100%;
-      object-fit: cover;
-    }
-  </style>
-</head>
-<body>
-  <div class="tweet-card">
-    <div class="header">
-      <img src="${escapeHtml(safeImageSrc(avatarUrl))}" class="avatar" />
-      <div class="user-info">
-        <div class="display-name">${escapeHtml(authorName)}</div>
-        <div class="username">@${escapeHtml(screenName)}</div>
-      </div>
-    </div>
-    <div class="tweet-text">${escapeHtml(tweetText)}</div>
-    ${mediaHTML}
-  </div>
-</body>
-</html>
-  `
-}
-
 interface ProcessedTweetMessage {
   parts: (h | string)[]
+}
+
+async function getTweetScreenshot(puppeteer, url: string, cookie?: string, outputLogs?: boolean): Promise<Buffer> {
+  const page = await puppeteer.page()
+  try {
+    if (outputLogs) logger.info(`开始截取真实 X 推文: ${url}`)
+    if (cookie) {
+      await page.setCookie({
+        name: 'auth_token',
+        value: cookie,
+        domain: '.x.com',
+        path: '/',
+        httpOnly: true,
+        secure: true
+      })
+    }
+    await page.goto(url, { waitUntil: 'networkidle2', timeout: 20000 })
+    const tweetElement = await page.waitForSelector('article[data-testid="tweet"]', { timeout: 15000 })
+    if (!tweetElement) throw new Error('无法在页面上定位到推文元素')
+    if (outputLogs) logger.info('已定位真实推文元素，开始截图')
+    return await tweetElement.screenshot({ type: 'png' })
+  } finally {
+    await page.close().catch(() => { })
+  }
 }
 
 export async function apply(ctx: Context, config: Config) {
@@ -269,132 +161,41 @@ export async function apply(ctx: Context, config: Config) {
     return null
   }
 
-  async function renderApiTweetCard(tpTweet, tweetWord: string, altOriginalText: string): Promise<ProcessedTweetMessage | null> {
-    if (!tpTweet.fromAPI || !tpTweet.authorName || !tpTweet.authorAvatar) return null
-
-    if (config.outputLogs) logger.info('开始渲染 HTML 卡片模式')
-    try {
-      const imageUrls = tpTweet.imageUrls || []
-      const videoUrls = tpTweet.videoUrls || []
-      if (config.outputLogs) logger.info(`媒体数量: 图片${imageUrls.length}, 视频${videoUrls.length}`)
-      const mediaPreviews: MediaPreview[] = []
-
-      for (const imgUrl of imageUrls.slice(0, 4)) {
-        try {
-          const imgData = await ctx.http.get(imgUrl, {
-            responseType: 'arraybuffer',
-            headers: { 'User-Agent': 'Mozilla/5.0' }
-          })
-          mediaPreviews.push({ url: `data:image/jpeg;base64,${Buffer.from(imgData).toString('base64')}` })
-        } catch (err) {
-          if (config.outputLogs) logger.warn('下载图片预览失败:', err)
-        }
-      }
-
-      for (const videoUrl of videoUrls) {
-        const thumbnailUrl = tpTweet.videoThumbnails?.[videoUrl]
-        if (!thumbnailUrl) continue
-        try {
-          const thumbData = await ctx.http.get(thumbnailUrl, {
-            responseType: 'arraybuffer',
-            headers: { 'User-Agent': 'Mozilla/5.0' }
-          })
-          const dimensions = tpTweet.mediaDimensions?.[videoUrl]
-          mediaPreviews.push({
-            url: `data:image/jpeg;base64,${Buffer.from(thumbData).toString('base64')}`,
-            width: dimensions?.width,
-            height: dimensions?.height,
-          })
-        } catch (err) {
-          if (config.outputLogs) logger.warn('下载视频缩略图失败:', err)
-        }
-      }
-
-      if (config.outputLogs) logger.info('开始下载头像')
-      const avatarData = await ctx.http.get(tpTweet.authorAvatar, {
-        responseType: 'arraybuffer',
-        headers: { 'User-Agent': 'Mozilla/5.0' }
-      })
-      const avatarDataUrl = `data:image/jpeg;base64,${Buffer.from(avatarData).toString('base64')}`
-
-      if (config.outputLogs) logger.info('生成 HTML 模板')
-      const html = generateTweetHTML(
-        tpTweet.authorName,
-        tpTweet.screenName,
-        avatarDataUrl,
-        tweetWord,
-        mediaPreviews
-      )
-
-      if (config.outputLogs) logger.info('开始渲染 HTML 为图片')
-      const page = await ctx.puppeteer.page()
-      let cardBuffer
-      try {
-        await page.setContent(html, { waitUntil: 'networkidle0' })
-        await page.setViewport({ width: 640, height: 1200 })
-        const cardElement = await page.$('.tweet-card')
-        cardBuffer = cardElement
-          ? await cardElement.screenshot({ type: 'png' })
-          : await page.screenshot({ type: 'png', fullPage: true })
-        if (config.outputLogs) logger.info('HTML 卡片渲染成功')
-      } finally {
-        await page.close()
-      }
-
-      const parts: (h | string)[] = [h.image(cardBuffer, 'image/png')]
-      if (config.outputLogs) logger.info(`准备下载 ${videoUrls.length} 个视频`)
-      for (const videoUrl of videoUrls) {
-        const videoElement = await retryMediaElement('下载视频', videoUrl, () => downloadVideoElement(videoUrl, 60000))
-        if (videoElement) {
-          parts.push(videoElement)
-          if (config.outputLogs) logger.info(`成功下载视频: ${videoUrl}`)
-        }
-      }
-
-      return { parts }
-    } catch (err) {
-      logger.error('渲染 HTML 卡片失败，降级到文字模式:', err)
-      return { parts: [tweetWord + altOriginalText] }
-    }
-  }
-
   async function buildTweetMessage(tpTweet, tweetWord: string, altOriginalText: string): Promise<ProcessedTweetMessage> {
-    const apiCard = await renderApiTweetCard(tpTweet, tweetWord, altOriginalText)
-    if (apiCard) return apiCard
-
     const parts: (h | string)[] = []
 
-    if (tpTweet.authorAvatar) {
+    if (tpTweet.url) {
       try {
-        const avatarResponse = await ctx.http.get(tpTweet.authorAvatar, {
-          responseType: 'arraybuffer',
-          headers: { 'User-Agent': 'Mozilla/5.0' }
-        })
-        parts.push(h.image(avatarResponse, 'image/jpeg'))
+        const screenshotBuffer = await getTweetScreenshot(ctx.puppeteer, tpTweet.url, config.cookies, config.outputLogs)
+        parts.push(h.image(screenshotBuffer, 'image/png'))
       } catch (err) {
-        if (config.outputLogs) logger.warn('获取博主头像失败:', err)
+        logger.warn('真实推文截图失败，降级使用已有截图或文字媒体模式:', err)
       }
     }
 
-    if (tpTweet.screenshotBuffer) {
+    if (!parts.length && tpTweet.screenshotBuffer) {
       parts.push(h.image(tpTweet.screenshotBuffer, "image/webp"))
     }
 
-    if (tweetWord) {
+    if (!parts.length && tweetWord) {
       parts.push(tweetWord + altOriginalText)
     }
 
-    const mediaUrls = tpTweet.mediaUrls || []
-    const imageUrls = mediaUrls.filter((u) => !u.endsWith('.mp4'))
-    const videoUrls = mediaUrls.filter((u) => u.endsWith('.mp4'))
+    const videoUrls = (tpTweet.videoUrls && tpTweet.videoUrls.length)
+      ? tpTweet.videoUrls
+      : (tpTweet.mediaUrls || []).filter((u) => u.endsWith('.mp4'))
 
-    const imageElements = await Promise.all(imageUrls.map((imageUrl) =>
-      retryMediaElement('请求图片', imageUrl, () => downloadImageElement(imageUrl))
-    ))
-    parts.push(...imageElements.filter((img) => img !== null))
+    if (!parts.length) {
+      const mediaUrls = tpTweet.mediaUrls || []
+      const imageUrls = mediaUrls.filter((u) => !u.endsWith('.mp4'))
+      const imageElements = await Promise.all(imageUrls.map((imageUrl) =>
+        retryMediaElement('请求图片', imageUrl, () => downloadImageElement(imageUrl))
+      ))
+      parts.push(...imageElements.filter((img) => img !== null))
+    }
 
     for (const videoUrl of videoUrls) {
-      const videoElement = await retryMediaElement('请求视频', videoUrl, () => downloadVideoElement(videoUrl))
+      const videoElement = await retryMediaElement('请求视频', videoUrl, () => downloadVideoElement(videoUrl, 60000))
       if (videoElement) {
         parts.push(videoElement)
         if (config.outputLogs) logger.info(`成功请求视频文件: ${videoUrl}`)
@@ -604,6 +405,7 @@ async function getTimePushedTweet(ctx, pptr, url, config, maxRetries?: number) {
         // API 成功，不需要截图
         if (config.outputLogs) logger.info('fxtwitter API 获取成功')
         return {
+          url,
           word_content: wordContent,
           altTexts: altTexts,
           mediaUrls: mediaUrls,
@@ -769,6 +571,7 @@ async function getTimePushedTweet(ctx, pptr, url, config, maxRetries?: number) {
           return el ? el.textContent.trim() : ''
         })
         return {
+          url,
           word_content: `${word_content}\n（注：此账号为受保护账号，故不提供具体媒体内容）`,
           altTexts: [],
           mediaUrls: [],
@@ -795,6 +598,7 @@ async function getTimePushedTweet(ctx, pptr, url, config, maxRetries?: number) {
               wordContentForTranslation += "\n\n" + altTexts.map((alt, i) => `[图片${altTexts.length > 1 ? (i + 1) : ""}描述: ${alt}]`).join("\n")
             }
             return {
+              url,
               word_content: wordContentForTranslation,
               altTexts: altTexts,
               mediaUrls: apiResponse.media_extended ? apiResponse.media_extended.map(m => m.url) : [],
@@ -805,6 +609,7 @@ async function getTimePushedTweet(ctx, pptr, url, config, maxRetries?: number) {
             logger.error(`请求 vxtwitter API 失败，正在尝试第 ${vxApiAttempts} 次重试...`, err)
             if (vxApiAttempts >= retryLimit) {
               return {
+                url,
                 word_content: '',
                 altTexts: [],
                 mediaUrls: [],
@@ -821,6 +626,7 @@ async function getTimePushedTweet(ctx, pptr, url, config, maxRetries?: number) {
       if (attempts >= retryLimit) {
         logger.error(`获取推文内容失败，已达最大重试次数。推文链接：${url}`, error)
         return {
+          url,
           word_content: '',
           altTexts: [],
           mediaUrls: [],
