@@ -163,11 +163,13 @@ export async function apply(ctx: Context, config: Config) {
 
   async function buildTweetMessage(tpTweet, tweetWord: string, altOriginalText: string): Promise<ProcessedTweetMessage> {
     const parts: (h | string)[] = []
+    let hasRenderedPreview = false
 
     if (tpTweet.url) {
       try {
         const screenshotBuffer = await getTweetScreenshot(ctx.puppeteer, tpTweet.url, config.cookies, config.outputLogs)
         parts.push(h.image(screenshotBuffer, 'image/png'))
+        hasRenderedPreview = true
       } catch (err) {
         logger.warn('真实推文截图失败，降级使用已有截图或文字媒体模式:', err)
       }
@@ -175,9 +177,14 @@ export async function apply(ctx: Context, config: Config) {
 
     if (!parts.length && tpTweet.screenshotBuffer) {
       parts.push(h.image(tpTweet.screenshotBuffer, "image/webp"))
+      hasRenderedPreview = true
     }
 
     if (!parts.length && tweetWord) {
+      parts.push(tweetWord + altOriginalText)
+    }
+
+    if (hasRenderedPreview && config.whe_translate === true && (tweetWord || altOriginalText)) {
       parts.push(tweetWord + altOriginalText)
     }
 
